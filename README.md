@@ -17,7 +17,7 @@ ledger and trajectory files and work regardless of what else is installed.
 ## Install
 
 ```bash
-openclaw plugins install clawhub:@bocharovf/probe
+openclaw plugins install clawhub:@bocharovf/openclaw-probe
 ```
 
 or, from a local checkout:
