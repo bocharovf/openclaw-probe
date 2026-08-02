@@ -149,7 +149,7 @@ export function formatVerboseReport(r: ProbeReport): string {
       "## Raw LLM request/response log",
       `entries_captured: ${r.llm_api_log.entries_captured}`,
       `file: ${r.llm_api_log.file ?? "none (no entries, or raw capture is disabled/not authorized - see README `hooks.allowConversationAccess`)"}`,
-      "Full system prompt/prompt/response text for every LLM call in the window, one JSON object per line, useful for inspecting exactly what a model saw when comparing two probes. Not needed for any of the numeric metrics above - those come from the audit ledger and trajectory files regardless of whether this capture is enabled.",
+      "Full system prompt/prompt/response text for one representative LLM call per completed agent run in the window, one JSON object per line. Capped at agents_used's run count, not iterations.llm_calls - the underlying llm_input/llm_output hooks fire once per agent run, not once per LLM completion inside a run's tool-calling loop, so a multi-step run's later calls in that loop are not individually archived here. Not needed for any of the numeric metrics above - those come from the audit ledger and trajectory files regardless of whether this capture is enabled.",
       "Source: probe's own llm_input/llm_output hook capture (see README) - not the llm-api-logger plugin.",
     ].join("\n"),
   );

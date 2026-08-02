@@ -37,6 +37,21 @@ describe("llm capture", () => {
     registerLlmCapture(api, config, llmLogDir, logger);
   }
 
+  /** Registers a fresh, independent instance (own handlers, own closures - registerLlmCapture
+   * is called again just as OpenClaw does live). Used to prove correlation survives across
+   * separate registerLlmCapture() calls via the module-level Map, not any one call's closure
+   * state - see the regression test below. */
+  function registerInstance(config = DEFAULT_CONFIG) {
+    const instanceHandlers: Record<string, (event: any, ctx?: any) => void> = {};
+    const api = {
+      on: (name: string, handler: (event: any, ctx?: any) => void) => {
+        instanceHandlers[name] = handler;
+      },
+    };
+    registerLlmCapture(api, config, llmLogDir, logger);
+    return instanceHandlers;
+  }
+
   it("does nothing when llmLog.enabled is false", async () => {
     register({ ...DEFAULT_CONFIG, llmLog: { ...DEFAULT_CONFIG.llmLog, enabled: false } });
     expect(handlers.llm_input).toBeUndefined();
@@ -115,6 +130,74 @@ describe("llm capture", () => {
 
     const before = await collectRawLlmEntries(llmLogDir, 0, Date.now() - 10_000);
     expect(before).toEqual([]);
+  });
+
+  it(
+    "regression: correlates llm_input and llm_output across separate registerLlmCapture() " +
+      "calls (root cause of live undercounting - only 1/15 llm_calls captured for a run with " +
+      "parallel sub-agents, because OpenClaw calls register() on this plugin multiple times " +
+      "within one still-running Gateway process - observed live as repeated '[probe] armed' " +
+      "log lines with a constant PID - and a Map created inside registerLlmCapture() was only " +
+      "visible to listeners added by that one call)",
+    async () => {
+      // Instance A's listeners see llm_input for this call; instance B's listeners (from a
+      // separate registerLlmCapture() call, as OpenClaw does live around sub-agent spawns) see
+      // the matching llm_output. Only the module-level Map, not either call's own closure
+      // state, can bridge that gap.
+      const instanceA = registerInstance();
+      instanceA.llm_input({ runId: "run-cross-instance", provider: "deepseek", model: "deepseek-v4-pro", prompt: "diagnose the pods" });
+
+      const instanceB = registerInstance();
+      instanceB.llm_output({ runId: "run-cross-instance", sessionId: "diag-state-session", usage: { total: 500 } });
+
+      const tsStart = Date.now() - 60_000;
+      const tsEnd = Date.now() + 60_000;
+      await waitFor(async () => (await collectRawLlmEntries(llmLogDir, tsStart, tsEnd)).length === 1);
+
+      const entries = await collectRawLlmEntries(llmLogDir, tsStart, tsEnd);
+      expect(entries[0].runId).toBe("run-cross-instance");
+      expect((entries[0].request as any).prompt).toBe("diagnose the pods");
+      expect((entries[0].usage as any).total).toBe(500);
+    },
+  );
+
+  it("does not double-capture a duplicate llm_output for the same runId", async () => {
+    register();
+    handlers.llm_input({ runId: "run-dup", provider: "p", model: "m" });
+    handlers.llm_output({ runId: "run-dup" });
+    handlers.llm_output({ runId: "run-dup" }); // duplicate - should be ignored, not double-written
+
+    const tsStart = Date.now() - 60_000;
+    const tsEnd = Date.now() + 60_000;
+    await waitFor(async () => (await collectRawLlmEntries(llmLogDir, tsStart, tsEnd)).length >= 1);
+    await new Promise((r) => setTimeout(r, 100)); // let any (unwanted) second write land
+
+    const entries = await collectRawLlmEntries(llmLogDir, tsStart, tsEnd);
+    expect(entries).toHaveLength(1);
+  });
+
+  it("multiple registrations for the same event still write exactly one entry (delete-on-read dedupe)", async () => {
+    // If OpenClaw calls register() N times for the process, each call adds its own pair of
+    // listeners, so one real llm_output fires N handler invocations. The first to see the
+    // module-level Map entry consumes it (delete-on-read); the rest must no-op, not throw and
+    // not write duplicate lines.
+    const instanceA = registerInstance();
+    const instanceB = registerInstance();
+    const instanceC = registerInstance();
+
+    instanceA.llm_input({ runId: "run-triple", provider: "p", model: "m" });
+    // Simulate the host fanning the same llm_output event out to every registered listener.
+    for (const instance of [instanceA, instanceB, instanceC]) {
+      instance.llm_output({ runId: "run-triple" });
+    }
+
+    const tsStart = Date.now() - 60_000;
+    const tsEnd = Date.now() + 60_000;
+    await waitFor(async () => (await collectRawLlmEntries(llmLogDir, tsStart, tsEnd)).length >= 1);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const entries = await collectRawLlmEntries(llmLogDir, tsStart, tsEnd);
+    expect(entries).toHaveLength(1);
   });
 });
 

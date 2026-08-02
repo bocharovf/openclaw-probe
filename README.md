@@ -67,6 +67,16 @@ easy to diagnose instead of looking like a bug.
 | `plugins.entries.probe.hooks.allowConversationAccess: true` | OpenClaw gates the `llm_input`/`llm_output` hooks behind an explicit opt-in for any plugin that isn't bundled with OpenClaw itself - without it, the host simply never invokes them. | `llm_api_log.entries_captured` is always `0` and `.file` is always `null`. Nothing else in the report is affected. |
 | `plugins.entries.probe.config.llmLog.enabled` is not `false` (default `true`) | Plugin-side switch for the same capture. | Same as above. |
 
+Even fully enabled, `llm_api_log.entries_captured` is capped at `sessions.agents_used` (the total
+count of completed agent runs), **not** `iterations.llm_calls`: the `llm_input`/`llm_output`
+hooks fire once per completed agent run, not once per individual model completion within a
+run's tool-calling loop. A run that makes 3 sequential LLM calls while working through a
+multi-step tool sequence contributes 3 to `llm_calls` but only 1 possible raw-archive entry.
+This is host behavior (confirmed by cross-checking against the independent `llm-api-logger`
+plugin, which shows the same ceiling), not something a plugin can widen. The raw archive is
+still useful for inspecting a representative prompt/response per run - just don't expect
+`entries_captured` to equal `llm_calls`.
+
 ```json5
 {
   "plugins": {
@@ -262,10 +272,10 @@ invoked.
 **`errors`** - tool calls and agent runs that did not finish with status `succeeded`,
 broken down by tool/status/error code.
 
-**`llm_api_log`** - `entries_captured` and the path to a `.rawrequests.jsonl` file with the
-full request/response for every LLM call in the window (one JSON object per line: provider,
-model, full system prompt/prompt/history, response text, usage, duration). `null`/`0` when
-raw capture is disabled or not authorized (see [Requirements](#requirements)),
+**`llm_api_log`** - `entries_captured` and the path to a `.rawrequests.jsonl` file with one
+JSON object per completed agent run in the window (provider, model, full system
+prompt/prompt/history, response text, usage, duration) - **not** one per `iterations.llm_calls`,
+see [Requirements](#requirements). `null`/`0` when raw capture is disabled or not authorized,
 or simply had nothing to capture. This is purely archival for close inspection of prompts -
 none of the numeric metrics above depend on it.
 

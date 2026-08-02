@@ -43,6 +43,27 @@ type InFlight = {
   request: unknown;
 };
 
+/** Correlates llm_input -> llm_output by runId. This is deliberately MODULE-scoped, not
+ * created fresh inside registerLlmCapture(): OpenClaw calls register() on this plugin
+ * multiple times within one still-running Gateway process (observed live as repeated
+ * "[probe] armed" log lines with a constant PID, most often around sub-agent spawns), and
+ * each call adds another pair of listeners rather than replacing the previous pair. A Map
+ * created inside registerLlmCapture() would only be visible to the one pair of listeners
+ * from that particular call, so an llm_input handled by one registration and the matching
+ * llm_output handled by another (or vice versa) would silently miss each other. A
+ * module-level Map is shared by every registration in the process, so it survives that.
+ *
+ * (`api.runContext.setRunContext`/`getRunContext` looked like the "correct" host-managed
+ * alternative for this - per-run scratch storage that isn't tied to any one plugin instance
+ * - but empirically, live on this host, setRunContext returns undefined instead of the
+ * documented boolean and the paired getRunContext never finds the value, so it's not usable
+ * here. Re-investigate if a future OpenClaw release fixes it.)
+ *
+ * Delete-after-read on the llm_output side makes duplicate listener registrations (multiple
+ * register() calls for the same call) safe: the first listener to see a given llm_output
+ * consumes the entry: the rest see nothing and no-op. */
+const inFlight = new Map<string, InFlight>();
+
 export type RawLlmLogEntry = {
   timestamp: string;
   provider: string;
@@ -95,9 +116,6 @@ export function registerLlmCapture(
   logger: PluginLogger,
 ): void {
   if (!config.llmLog.enabled) return;
-
-  const inFlight = new Map<string, InFlight>();
-  let dirReady: Promise<void> | undefined;
 
   api.on(
     "llm_input",
@@ -154,8 +172,10 @@ export function registerLlmCapture(
       const filePath = dayFilePath(llmLogDir, new Date());
       const line = `${JSON.stringify(entry)}\n`;
 
-      dirReady ??= mkdir(llmLogDir, { recursive: true }).then(() => undefined);
-      dirReady
+      // mkdir recursive is cheap and idempotent - call it every time rather than caching
+      // "already ensured" in a module-level flag, which would go stale if llmLogDir ever
+      // differs across registerLlmCapture() calls (e.g. isolated test runs).
+      mkdir(llmLogDir, { recursive: true })
         .then(() => rotateIfNeeded(filePath, llmLogDir, config, logger))
         .then(() => appendFile(filePath, line, "utf-8"))
         .catch((err) => logger.warn(`[probe] failed to write raw LLM log: ${String(err)}`));
