@@ -105,16 +105,17 @@ matching note in the report's `warnings` array.
 | `/probe <start> <end> [name]` | Build (and save) a measurement for a past time range. Timestamps are ISO 8601, e.g. `2026-08-01T00:00:00Z`. `name` is optional and defaults to `"<start> .. <end>"` if omitted. |
 | `/probe <name>` | Print a saved measurement's report as JSON. |
 | `/probe verbose <name>` | Print a saved measurement's report as an annotated, human-readable text report explaining every field. |
+| `/probe list` | List the last 50 saved measurements, newest first, with their name, generation timestamp, and mode. |
 | `/probe` (no args) | Print this command summary. |
 
 Only **one** `start`ed measurement can be active at a time - `/probe start` while one is
 already running is rejected, and you must `/probe stop` (or let it finish) before starting
 another.
 
-A probe name cannot be exactly `start`, `stop`, or `verbose` (reserved words), and cannot be
-two ISO 8601 timestamps separated by whitespace (that parses as a range request instead).
-Names may contain spaces, e.g. `/probe start baseline before cache change`. The same rules
-apply to the optional trailing name on `/probe <start> <end> [name]`.
+A probe name cannot be exactly `start`, `stop`, `verbose`, or `list` (reserved words), and
+cannot be two ISO 8601 timestamps separated by whitespace (that parses as a range request
+instead). Names may contain spaces, e.g. `/probe start baseline before cache change`. The
+same rules apply to the optional trailing name on `/probe <start> <end> [name]`.
 
 Naming a range measurement is recommended - the auto-generated `"<start> .. <end>"` name
 works but is unwieldy to type back exactly (it must match character-for-character, aside
@@ -132,6 +133,8 @@ from case) when you later want `/probe <name>` or `/probe verbose <name>`.
 /probe 2026-08-01T00:00:00Z 2026-08-01T06:00:00Z incident-postmortem
 /probe incident-postmortem
 /probe verbose incident-postmortem
+
+/probe list
 ```
 
 ### Error messages

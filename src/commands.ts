@@ -1,12 +1,13 @@
 import { buildReport } from "./report.js";
 import type { ProbePaths } from "./paths.js";
 import { slugify } from "./paths.js";
-import { clearActiveMarker, readActiveMarker, readResult, writeActiveMarker, writeResult } from "./store.js";
+import { clearActiveMarker, listResults, readActiveMarker, readResult, writeActiveMarker, writeResult } from "./store.js";
 import { formatVerboseReport } from "./format.js";
 import { ProbeUserError, type PluginLogger, type ProbeConfig } from "./types.js";
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-const RESERVED_NAMES = new Set(["start", "stop", "verbose"]);
+const RESERVED_NAMES = new Set(["start", "stop", "verbose", "list"]);
+const LIST_LIMIT = 50;
 
 const HELP_TEXT = [
   "Probe - agent run cost/speed/behavior measurement.",
@@ -19,8 +20,9 @@ const HELP_TEXT = [
   "                                            defaults to \"<start-ts> .. <end-ts>\" if omitted.",
   "  /probe <name>                           show a saved measurement as JSON",
   "  /probe verbose <name>                   show a saved measurement as an annotated report",
+  `  /probe list                             list the last ${LIST_LIMIT} saved measurements, newest first`,
   "",
-  "A probe name cannot be \"start\", \"stop\", \"verbose\", or look like two timestamps.",
+  "A probe name cannot be \"start\", \"stop\", \"verbose\", or \"list\", or look like two timestamps.",
   "Only one `start`ed measurement can be active at a time.",
 ].join("\n");
 
@@ -31,6 +33,7 @@ type Command =
   | { type: "range"; startIso: string; endIso: string; name?: string }
   | { type: "show"; name: string }
   | { type: "verbose"; name: string }
+  | { type: "list" }
   | { type: "error"; message: string };
 
 export function parseProbeArgs(raw: string): Command {
@@ -61,6 +64,13 @@ export function parseProbeArgs(raw: string): Command {
     return { type: "verbose", name };
   }
 
+  if (head === "list") {
+    if (tokens.length > 1) {
+      return { type: "error", message: "`/probe list` takes no arguments. Did you mean `/probe list`?" };
+    }
+    return { type: "list" };
+  }
+
   if (tokens.length >= 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
     const name = tokens.slice(2).join(" ").trim();
     if (!name) return { type: "range", startIso: tokens[0], endIso: tokens[1] };
@@ -74,7 +84,7 @@ export function parseProbeArgs(raw: string): Command {
 
 function validateProbeName(name: string): string | null {
   if (RESERVED_NAMES.has(name.toLowerCase())) {
-    return `"${name}" is a reserved word and cannot be used as a probe name (start/stop/verbose).`;
+    return `"${name}" is a reserved word and cannot be used as a probe name (start/stop/verbose/list).`;
   }
   const tokens = name.split(/\s+/);
   if (tokens.length === 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
@@ -113,6 +123,9 @@ export async function runProbeCommand(raw: string, deps: CommandDeps): Promise<s
 
     case "verbose":
       return handleVerbose(cmd.name, deps);
+
+    case "list":
+      return handleList(deps);
   }
 }
 
@@ -239,4 +252,21 @@ async function handleVerbose(name: string, deps: CommandDeps): Promise<string> {
     );
   }
   return formatVerboseReport(report);
+}
+
+async function handleList(deps: CommandDeps): Promise<string> {
+  const { summaries, total } = await listResults(deps.paths, LIST_LIMIT);
+  if (total === 0) {
+    return (
+      "No saved measurements yet. Start one with `/probe start <name>`, or build one for a " +
+      "past time range with `/probe <start> <end> [name]`."
+    );
+  }
+
+  const lines = summaries.map((r, i) => `${i + 1}. ${r.generatedAt}  "${r.name}"  (${r.mode})`);
+  const header =
+    total > summaries.length
+      ? `Newest ${summaries.length} of ${total} saved measurements:`
+      : `${total} saved measurement${total === 1 ? "" : "s"}, newest first:`;
+  return [header, ...lines].join("\n");
 }

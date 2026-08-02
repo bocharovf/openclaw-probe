@@ -52,6 +52,7 @@ describe("parseProbeArgs", () => {
     expect(parseProbeArgs("start start")).toMatchObject({ type: "error" });
     expect(parseProbeArgs("start stop")).toMatchObject({ type: "error" });
     expect(parseProbeArgs("start verbose")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("start list")).toMatchObject({ type: "error" });
   });
 
   it("start rejects a name that looks like a time range", () => {
@@ -69,6 +70,14 @@ describe("parseProbeArgs", () => {
   it("verbose requires a name", () => {
     expect(parseProbeArgs("verbose")).toMatchObject({ type: "error" });
     expect(parseProbeArgs("verbose my run")).toEqual({ type: "verbose", name: "my run" });
+  });
+
+  it("list with no args", () => {
+    expect(parseProbeArgs("list")).toEqual({ type: "list" });
+  });
+
+  it("list rejects extra args", () => {
+    expect(parseProbeArgs("list now")).toMatchObject({ type: "error" });
   });
 
   it("two ISO timestamps -> range with no name", () => {
@@ -213,5 +222,39 @@ describe("runProbeCommand", () => {
     const verbose = await runProbeCommand("verbose baseline", deps);
     expect(verbose).toContain('PROBE REPORT: "baseline"');
     expect(verbose).toContain("## Tokens");
+  });
+
+  it("list says so when nothing has been saved yet", async () => {
+    const result = await runProbeCommand("list", deps);
+    expect(result).toMatch(/No saved measurements yet/);
+  });
+
+  it("list rejects extra arguments", async () => {
+    const result = await runProbeCommand("list now", deps);
+    expect(result).toMatch(/takes no arguments/);
+  });
+
+  it("list shows saved measurements newest first", async () => {
+    mockedBuildReport.mockResolvedValueOnce({
+      report: emptyReport({ probe: { name: "first", mode: "start-stop", generated_at: "2026-08-01T00:00:00.000Z" } }),
+      hasAnyAuditEvents: true,
+    });
+    await runProbeCommand("start first", deps);
+    await runProbeCommand("stop", deps);
+
+    mockedBuildReport.mockResolvedValueOnce({
+      report: emptyReport({ probe: { name: "second", mode: "range", generated_at: "2026-08-02T00:00:00.000Z" } }),
+      hasAnyAuditEvents: true,
+    });
+    await runProbeCommand("start second", deps);
+    await runProbeCommand("stop", deps);
+
+    const list = await runProbeCommand("list", deps);
+    const lines = list.split("\n");
+    expect(lines[0]).toMatch(/2 saved measurements, newest first/);
+    expect(lines[1]).toContain('"second"');
+    expect(lines[1]).toContain("(range)");
+    expect(lines[2]).toContain('"first"');
+    expect(lines[2]).toContain("(start-stop)");
   });
 });
