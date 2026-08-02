@@ -98,7 +98,7 @@ export type ProbeReport = {
   };
   tools_used: Record<string, number>;
   plugins_used: string[];
-  skills_used: Record<string, SkillUsageEntry> | null;
+  skills_used: Record<string, SkillUsageEntry>;
   errors: {
     tool_call_errors: {
       count: number;

@@ -27,6 +27,7 @@ export type ProbePaths = {
   probeResultsDir: string;
   probeActiveMarkerPath: string;
   llmLogDir: string;
+  skillLogDir: string;
 };
 
 export function resolvePaths(baseDir: string): ProbePaths {
@@ -38,6 +39,7 @@ export function resolvePaths(baseDir: string): ProbePaths {
     probeResultsDir: join(probeStateDir, "results"),
     probeActiveMarkerPath: join(probeStateDir, "active.json"),
     llmLogDir: join(baseDir, "logs", "probe", "llm-api"),
+    skillLogDir: join(baseDir, "logs", "probe", "skill-usage"),
   };
 }
 

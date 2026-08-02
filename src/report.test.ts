@@ -12,7 +12,8 @@ vi.mock("./trajectory.js", () => ({
   extractSystemPromptChars: vi.fn().mockReturnValue(undefined),
 }));
 vi.mock("./skillUsage.js", () => ({
-  collectSkillUsage: vi.fn().mockResolvedValue(null),
+  collectSkillUsage: vi.fn().mockResolvedValue({}),
+  registerSkillCapture: vi.fn(),
 }));
 vi.mock("./llmCapture.js", () => ({
   collectRawLlmEntries: vi.fn().mockResolvedValue([]),
@@ -86,7 +87,7 @@ describe("buildReport", () => {
     expect(report.errors.tool_call_errors.by_tool).toEqual({ read: 1 });
     expect(report.errors.tool_call_errors.by_code).toEqual({ not_found: 1 });
     expect(report.errors.agent_run_errors.count).toBe(0);
-    expect(report.skills_used).toBeNull();
+    expect(report.skills_used).toEqual({});
   });
 
   it("excludes runs and tool calls that never finished inside the window", async () => {

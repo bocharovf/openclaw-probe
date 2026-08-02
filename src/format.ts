@@ -122,14 +122,12 @@ export function formatVerboseReport(r: ProbeReport): string {
   sections.push(
     [
       "## Skills used",
-      r.skills_used === null
-        ? "unavailable - the skill-usage plugin's event log was not found on this host (plugin not installed/enabled), so skill invocation counts could not be computed for this window."
-        : Object.keys(r.skills_used).length === 0
-          ? "none invoked in this window."
-          : Object.entries(r.skills_used)
-              .map(([k, v]) => `  ${k}: ${v.uses} use(s)`)
-              .join("\n"),
-      "Source: the skill-usage plugin's own append-only event log, filtered to this window by timestamp (not a cumulative counter, so this works for past date ranges too).",
+      Object.keys(r.skills_used).length === 0
+        ? "none invoked in this window."
+        : Object.entries(r.skills_used)
+            .map(([k, v]) => `  ${k}: ${v.uses} use(s)`)
+            .join("\n"),
+      "Source: probe's own detection - watches after_tool_call for a read of a SKILL.md file and recovers the skill's declared name from its frontmatter. Windowed by timestamp, not a cumulative counter, so this works for past date ranges too.",
     ].join("\n"),
   );
 

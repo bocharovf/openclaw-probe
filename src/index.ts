@@ -8,15 +8,17 @@
  * the two reports.
  *
  * Numeric metrics come from `openclaw audit --json` (time, tool calls, errors), each run's
- * trajectory file (tokens, LLM call counts, context size), and the skill-usage plugin's own
- * event log (skill invocation counts) - all read-only, all through documented CLI/filesystem
- * surfaces available to any installed plugin. The optional raw request/response archive is
- * captured by this plugin's own llm_input/llm_output hooks, not the llm-api-logger plugin.
+ * trajectory file (tokens, LLM call counts, context size), and this plugin's own
+ * after_tool_call-based skill detection (skill invocation counts) - all through documented
+ * CLI/filesystem/hook surfaces, no dependency on the skill-usage plugin being installed. The
+ * optional raw request/response archive is captured by this plugin's own llm_input/llm_output
+ * hooks, not the llm-api-logger plugin.
  */
 import { definePluginEntry, type OpenClawPluginDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { runProbeCommand } from "./commands.js";
 import { registerLlmCapture } from "./llmCapture.js";
 import { resolveBaseDir, resolvePaths } from "./paths.js";
+import { registerSkillCapture } from "./skillUsage.js";
 import { DEFAULT_CONFIG, ProbeUserError, type ProbeConfig } from "./types.js";
 
 function mergeConfig(raw: Partial<ProbeConfig> | undefined): ProbeConfig {
@@ -46,6 +48,7 @@ const entry: OpenClawPluginDefinition = definePluginEntry({
     api.logger?.info?.(`[probe] armed - base dir: ${baseDir}`);
 
     registerLlmCapture(api, config, paths.llmLogDir, api.logger);
+    registerSkillCapture(api, paths.skillLogDir, api.logger);
 
     api.registerCommand({
       name: "probe",

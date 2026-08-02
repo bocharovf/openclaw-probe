@@ -9,10 +9,11 @@ skill, a prompt tweak, a different model, a new tool plugin) make the agent chea
 faster, or more/less reliable?* Run the same task with `/probe start` / `/probe stop`
 bracketing it, make your change, run it again, and diff the two JSON reports.
 
-Probe is self-contained: it captures its own LLM request/response data via hooks and does
-**not** depend on the `llm-api-logger` plugin or any other plugin being installed. Its core
-numeric metrics (time, tokens, tool/skill usage, errors) come from OpenClaw's own audit
-ledger and trajectory files and work regardless of what else is installed.
+Probe is self-contained: it captures its own LLM request/response data and detects its own
+skill usage via hooks, and does **not** depend on the `llm-api-logger` or `skill-usage`
+plugins, or any other plugin, being installed. Its core numeric metrics (time, tokens,
+tool/skill usage, errors) come from OpenClaw's own audit ledger, trajectory files, and
+probe's own hook-based detection, and work regardless of what else is installed.
 
 ## Install
 
@@ -31,10 +32,10 @@ openclaw plugins install . --force
 ## Requirements
 
 Probe reads from several OpenClaw subsystems (chat commands, the audit ledger, trajectory
-files, the `skill-usage` plugin, its own hooks). Each has its own config gate. This section
-lists what has to be true on the host for `/probe` to work at all, and separately, what each
-*optional* piece of the report additionally needs - so a report that is missing a field is
-easy to diagnose instead of looking like a bug.
+files, its own hooks). Each has its own config gate. This section lists what has to be true
+on the host for `/probe` to work at all, and separately, what the one genuinely *optional*
+piece of the report additionally needs - so a report that is missing a field is easy to
+diagnose instead of looking like a bug.
 
 ### Required - without these, `/probe` does not run at all
 
@@ -54,11 +55,15 @@ easy to diagnose instead of looking like a bug.
 | The probed window is inside the audit ledger's retention (**30 days / 100,000 rows**, not configurable) | Older records are pruned; there's nothing to read. | Same "No data found" error for `/probe <start> <end>` on an old range. Always use `/probe start`/`stop` for anything you want reliably measured, and treat `/probe <start> <end>` as best-effort for anything more than a few days old. |
 | Trajectory sidecar files for the involved runs still exist on disk (written automatically, no on/off switch - but `session.maintenance` can prune old ones as part of its retention/disk-budget cleanup) | `tokens`, `models_used`, `context`, and `llm_calls`/`tool_calling_rounds` come from each run's `<agent>/sessions/<session>.trajectory.jsonl`. | Those fields undercount or stay at `0` for the affected runs, and the report's `warnings` array names the run id it couldn't find a trajectory for. `time`/`iterations`/`errors`/`tools_used` are unaffected (audit-ledger-only). |
 
-### Optional - `skills_used`
-
-| Setting | Needed because | Symptom if missing/wrong |
-| --- | --- | --- |
-| The bundled `skill-usage` plugin is installed and enabled (`plugins.allow` includes `"skill-usage"`, `plugins.entries.skill-usage.enabled: true`) | `skills_used` is read from that plugin's own event log; probe does not track skill usage itself. | `skills_used` is `null` (not `{}` - distinguishable from "present but zero uses") and a note appears in `warnings`. Every other field is unaffected. |
+`skills_used` needs no separate config at all - it's a core metric like the rest of this
+table, not gated behind an operator opt-in or another plugin. Probe detects skill use itself
+by watching `before_tool_call`/`after_tool_call` (which, unlike `llm_input`/`llm_output`
+below, are not gated by `hooks.allowConversationAccess`) for a read of a `SKILL.md` file and
+recovering the declared skill name from its frontmatter - see [Data sources](#data-sources).
+The one inherent limitation: it only recognizes a fixed set of read-tool names (`read`,
+`functions.read`, `read_file`, `filesystem.read`, `fs.read`); a skill loaded through some
+other, unrecognized read-tool alias would not be counted. This has not been observed in
+practice - OpenClaw's core file-read tool is named `read`.
 
 ### Optional - raw LLM request/response archive (`llm_api_log`)
 
@@ -200,7 +205,7 @@ explanation attached to every section.
   },
   "tools_used": { "k8s_get_pods": 2, "postgres_query": 1, "read": 3 },
   "plugins_used": ["core", "k8s-ops", "postgres-ops"],     // owning plugin per tool above ("core" = built-in)
-  "skills_used": { "aiops-incident": { "name": "aiops-incident", "uses": 1 } },  // or null - see below
+  "skills_used": { "aiops-incident": { "name": "aiops-incident", "uses": 1 } },  // {} if none used
   "errors": {
     "tool_call_errors": {
       "count": 1,
@@ -269,10 +274,9 @@ proxy for context bloat.
 **`tools_used`** / **`plugins_used`** - tool call counts by name, and the owning plugin id
 for each (`"core"` for built-in tools not from an installed plugin).
 
-**`skills_used`** - use counts per skill in the window, or **`null`** if the bundled
-`skill-usage` plugin's event log was not found on this host (that plugin not
-installed/enabled) - distinct from `{}`, which means the plugin is present but nothing was
-invoked.
+**`skills_used`** - use counts per skill in the window, keyed by a slugified skill id.
+Detected by probe itself (see [Requirements](#requirements)); `{}` means no skill was used in
+the window, not that detection is unavailable.
 
 **`errors`** - tool calls and agent runs that did not finish with status `succeeded`,
 broken down by tool/status/error code.
@@ -284,8 +288,8 @@ see [Requirements](#requirements). `null`/`0` when raw capture is disabled or no
 or simply had nothing to capture. This is purely archival for close inspection of prompts -
 none of the numeric metrics above depend on it.
 
-**`warnings`** - non-fatal notes, e.g. a run's trajectory file was rotated/deleted before
-the report could read it, or `skills_used` came back `null`.
+**`warnings`** - non-fatal notes, e.g. a run's trajectory file was rotated/deleted before the
+report could read it.
 
 ## Data sources
 
@@ -293,7 +297,7 @@ the report could read it, or `skills_used` came back `null`.
 | --- | --- |
 | Time, agent/tool run pairing, errors, tool names, session/agent ids | `openclaw audit --json --after <ms> --before <ms>` (paginated). Metadata-only, 30-day / 100,000-row retention - see [Audit records](https://docs.openclaw.ai/cli/audit). |
 | Tokens, LLM call count, tool-calling rounds, models used, context size | Each involved run's trajectory file: `<base>/agents/<agentId>/sessions/<sessionId>.trajectory.jsonl` (`model.completed` and `context.compiled` events). |
-| Skill usage | The bundled `skill-usage` plugin's own event log: `<base>/state/plugins/skill-usage/events/skill-usage-events.jsonl`, filtered by timestamp. Best-effort - `null` if that plugin isn't present. |
+| Skill usage | This plugin's own `after_tool_call` hook handler, watching for a read-family tool call whose target file's basename is `SKILL.md` and recovering the skill's declared name from the file content's YAML frontmatter (falling back to the containing directory's name). Written to `<base>/logs/probe/skill-usage/<date>.jsonl`, filtered by timestamp - independent of the `skill-usage` plugin. Skills are not invoked through a dedicated tool call in OpenClaw; reading their `SKILL.md` *is* how a skill gets used (see [docs/tools/skills.md](https://docs.openclaw.ai/tools/skills)). |
 | Tool -> plugin ownership | `openclaw plugins list --json`, each plugin's manifest-declared `contracts.tools` (no plugin runtimes are loaded to compute this, so it stays fast regardless of how many plugins are installed). |
 | Raw LLM request/response archive | This plugin's own `llm_input`/`llm_output` hook handlers, written to `<base>/logs/probe/llm-api/<date>.jsonl` - independent of the `llm-api-logger` plugin. |
 
@@ -347,8 +351,9 @@ npm test
 npm run plugin:install   # build + `openclaw plugins install . --force`
 ```
 
-Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts` /
-`src/skillUsage.ts` (filesystem readers), `src/llmCapture.ts` (hook-based raw log capture),
+Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts`
+(trajectory-file readers), `src/llmCapture.ts` (hook-based raw LLM log capture),
+`src/skillUsage.ts` (hook-based skill-use detection and its own log capture/collection),
 `src/report.ts` (aggregation), `src/commands.ts` (`/probe` argument parsing and dispatch),
 `src/format.ts` (verbose report rendering), `src/index.ts` (plugin registration).
 

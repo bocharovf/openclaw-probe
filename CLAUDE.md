@@ -106,6 +106,28 @@ which does not scale past a handful of installed plugins.
 published npm package (`files` in `package.json` ships the whole `dist/`
 directory as-is).
 
+**There is no dedicated tool call for "a skill was used" — OpenClaw skills are
+read as plain files.** `src/skillUsage.ts`'s detection watches
+`after_tool_call` for a read-family tool (`read`, `read_file`, etc.) whose
+target path's basename is `SKILL.md`, then recovers the declared skill name
+from the file content's YAML frontmatter. This mirrors what the separately
+installed `skill-usage` plugin does internally (confirmed by reading its
+actual source on this dev host, under
+`~/.openclaw/npm/projects/openclaw-skill-usage/`) — replicating the technique
+removed the dependency on that plugin's output file entirely. Unlike the
+`llm_input`/`llm_output` pair in `llmCapture.ts`, `after_tool_call` alone
+carries both `params` (the read path) and `result` (the file content) on one
+event, so this needed no before/after correlation map and none of the
+module-scope gotcha above — one hook, one event, done. If you ever add
+detection for some other tool-based signal, check first whether the hook you
+need already bundles everything in one event before reaching for a
+before/after pending-state pattern.
+
+**`before_tool_call`/`after_tool_call` do not require
+`hooks.allowConversationAccess`** (unlike `llm_input`/`llm_output`) — this is
+why `skills_used` needs no operator opt-in while `llm_api_log` does. Don't
+conflate the two when explaining either in the README.
+
 ## Dev workflow
 
 ```bash

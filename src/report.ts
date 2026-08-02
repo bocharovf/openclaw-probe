@@ -148,8 +148,8 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     if (chars) contextCharsSamples.push(chars);
   }
 
-  // ---- skills (windowed from the skill-usage plugin's own event log; null if unavailable) ----
-  const skillsUsed = await collectSkillUsage(paths.baseDir, tsStartMs, tsEndMs);
+  // ---- skills (windowed from probe's own after_tool_call-based detection log) ----
+  const skillsUsed = await collectSkillUsage(paths.skillLogDir, tsStartMs, tsEndMs);
 
   // ---- tool -> plugin ownership ----
   const toolToPlugin = await fetchToolToPluginMap(config).catch(() => new Map<string, string>());
@@ -166,9 +166,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   const warnings = missingTrajectoryRuns.map(
     (r) => `trajectory model.completed not found for run_id=${r} (rotated/deleted trajectory file, or run still in flight)`,
   );
-  if (skillsUsed === null) {
-    warnings.push("skills_used unavailable: skill-usage plugin event log not found on this host");
-  }
 
   const report: ProbeReport = {
     probe: { name, mode, generated_at: iso(Date.now()) },
