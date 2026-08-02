@@ -53,6 +53,7 @@ describe("parseProbeArgs", () => {
     expect(parseProbeArgs("start stop")).toMatchObject({ type: "error" });
     expect(parseProbeArgs("start verbose")).toMatchObject({ type: "error" });
     expect(parseProbeArgs("start list")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("start delete")).toMatchObject({ type: "error" });
   });
 
   it("start rejects a name that looks like a time range", () => {
@@ -78,6 +79,11 @@ describe("parseProbeArgs", () => {
 
   it("list rejects extra args", () => {
     expect(parseProbeArgs("list now")).toMatchObject({ type: "error" });
+  });
+
+  it("delete requires a name", () => {
+    expect(parseProbeArgs("delete")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("delete old baseline")).toEqual({ type: "delete", name: "old baseline" });
   });
 
   it("two ISO timestamps -> range with no name", () => {
@@ -256,5 +262,47 @@ describe("runProbeCommand", () => {
     expect(lines[1]).toContain("(range)");
     expect(lines[2]).toContain('"first"');
     expect(lines[2]).toContain("(start-stop)");
+  });
+
+  it("delete of an unknown name is rejected", async () => {
+    await expect(runProbeCommand("delete does-not-exist", deps)).rejects.toThrow(/No measurement named/);
+  });
+
+  it("deletes a saved measurement so it no longer shows up or resolves by name", async () => {
+    mockedBuildReport.mockResolvedValueOnce({
+      report: emptyReport({ probe: { name: "baseline", mode: "start-stop", generated_at: "2026-08-01T00:00:00.000Z" } }),
+      hasAnyAuditEvents: true,
+    });
+    await runProbeCommand("start baseline", deps);
+    await runProbeCommand("stop", deps);
+    expect(await runProbeCommand("baseline", deps)).toContain('"name": "baseline"');
+
+    const result = await runProbeCommand("delete baseline", deps);
+    expect(result).toBe('Deleted measurement "baseline".');
+
+    await expect(runProbeCommand("baseline", deps)).rejects.toThrow(/No measurement named/);
+    await expect(runProbeCommand("verbose baseline", deps)).rejects.toThrow(/No measurement named/);
+    expect(await runProbeCommand("list", deps)).toMatch(/No saved measurements yet/);
+  });
+
+  it("deleting one measurement does not affect another", async () => {
+    mockedBuildReport.mockResolvedValueOnce({
+      report: emptyReport({ probe: { name: "keep-me", mode: "start-stop", generated_at: "2026-08-01T00:00:00.000Z" } }),
+      hasAnyAuditEvents: true,
+    });
+    await runProbeCommand("start keep-me", deps);
+    await runProbeCommand("stop", deps);
+
+    mockedBuildReport.mockResolvedValueOnce({
+      report: emptyReport({ probe: { name: "delete-me", mode: "start-stop", generated_at: "2026-08-02T00:00:00.000Z" } }),
+      hasAnyAuditEvents: true,
+    });
+    await runProbeCommand("start delete-me", deps);
+    await runProbeCommand("stop", deps);
+
+    await runProbeCommand("delete delete-me", deps);
+
+    await expect(runProbeCommand("delete-me", deps)).rejects.toThrow(/No measurement named/);
+    expect(await runProbeCommand("keep-me", deps)).toContain('"name": "keep-me"');
   });
 });

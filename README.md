@@ -106,16 +106,17 @@ matching note in the report's `warnings` array.
 | `/probe <name>` | Print a saved measurement's report as JSON. |
 | `/probe verbose <name>` | Print a saved measurement's report as an annotated, human-readable text report explaining every field. |
 | `/probe list` | List the last 50 saved measurements, newest first, with their name, generation timestamp, and mode. |
+| `/probe delete <name>` | Delete a saved measurement (its report and raw-request archive, if any). Fails if the name doesn't exist. |
 | `/probe` (no args) | Print this command summary. |
 
 Only **one** `start`ed measurement can be active at a time - `/probe start` while one is
 already running is rejected, and you must `/probe stop` (or let it finish) before starting
 another.
 
-A probe name cannot be exactly `start`, `stop`, `verbose`, or `list` (reserved words), and
-cannot be two ISO 8601 timestamps separated by whitespace (that parses as a range request
-instead). Names may contain spaces, e.g. `/probe start baseline before cache change`. The
-same rules apply to the optional trailing name on `/probe <start> <end> [name]`.
+A probe name cannot be exactly `start`, `stop`, `verbose`, `list`, or `delete` (reserved
+words), and cannot be two ISO 8601 timestamps separated by whitespace (that parses as a range
+request instead). Names may contain spaces, e.g. `/probe start baseline before cache change`.
+The same rules apply to the optional trailing name on `/probe <start> <end> [name]`.
 
 Naming a range measurement is recommended - the auto-generated `"<start> .. <end>"` name
 works but is unwieldy to type back exactly (it must match character-for-character, aside
@@ -135,6 +136,7 @@ from case) when you later want `/probe <name>` or `/probe verbose <name>`.
 /probe verbose incident-postmortem
 
 /probe list
+/probe delete baseline
 ```
 
 ### Error messages
@@ -144,7 +146,7 @@ silent wrong answer:
 
 - Starting a measurement while one is already active.
 - Stopping when no measurement is active.
-- Showing (JSON or verbose) a measurement name that does not exist.
+- Showing (JSON or verbose) or deleting a measurement name that does not exist.
 - A time range where the start is not strictly before the end.
 - A time range whose source data is unavailable - nothing in OpenClaw's audit ledger falls
   inside the window (wrong range, a typo, or the window is older than the ledger's 30-day /

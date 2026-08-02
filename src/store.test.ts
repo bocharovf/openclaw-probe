@@ -1,10 +1,19 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile as writeFileRaw } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolvePaths } from "./paths.js";
-import { listResults, writeResult } from "./store.js";
+import { deleteResult, listResults, rawRequestsPath, readResult, writeResult } from "./store.js";
 import type { ProbeReport } from "./types.js";
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function report(name: string, mode: ProbeReport["probe"]["mode"], generatedAt: string): ProbeReport {
   return {
@@ -89,5 +98,56 @@ describe("listResults", () => {
     const { summaries, total } = await listResults(paths, 50);
     expect(total).toBe(1);
     expect(summaries[0].name).toBe("good");
+  });
+});
+
+describe("deleteResult", () => {
+  let baseDir: string;
+  let paths: ReturnType<typeof resolvePaths>;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "probe-delete-"));
+    paths = resolvePaths(baseDir);
+  });
+
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it("returns false and deletes nothing when the name does not exist", async () => {
+    const deleted = await deleteResult(paths, "does-not-exist");
+    expect(deleted).toBe(false);
+  });
+
+  it("deletes the report file and returns true", async () => {
+    await writeResult(paths, "baseline", report("baseline", "start-stop", "2026-08-01T00:00:00.000Z"));
+    const deleted = await deleteResult(paths, "baseline");
+    expect(deleted).toBe(true);
+    expect(await readResult(paths, "baseline")).toBeNull();
+  });
+
+  it("also deletes the raw-requests sidecar file if present", async () => {
+    await writeResult(paths, "baseline", report("baseline", "start-stop", "2026-08-01T00:00:00.000Z"));
+    const rawPath = rawRequestsPath(paths, "baseline");
+    await writeFileRaw(rawPath, '{"some":"entry"}\n');
+    expect(await exists(rawPath)).toBe(true);
+
+    await deleteResult(paths, "baseline");
+    expect(await exists(rawPath)).toBe(false);
+  });
+
+  it("does not throw when the report exists but the sidecar file does not", async () => {
+    await writeResult(paths, "baseline", report("baseline", "start-stop", "2026-08-01T00:00:00.000Z"));
+    await expect(deleteResult(paths, "baseline")).resolves.toBe(true);
+  });
+
+  it("does not affect other saved measurements", async () => {
+    await writeResult(paths, "keep-me", report("keep-me", "start-stop", "2026-08-01T00:00:00.000Z"));
+    await writeResult(paths, "delete-me", report("delete-me", "start-stop", "2026-08-02T00:00:00.000Z"));
+
+    await deleteResult(paths, "delete-me");
+
+    expect(await readResult(paths, "delete-me")).toBeNull();
+    expect(await readResult(paths, "keep-me")).not.toBeNull();
   });
 });

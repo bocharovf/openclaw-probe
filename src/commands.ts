@@ -1,12 +1,12 @@
 import { buildReport } from "./report.js";
 import type { ProbePaths } from "./paths.js";
 import { slugify } from "./paths.js";
-import { clearActiveMarker, listResults, readActiveMarker, readResult, writeActiveMarker, writeResult } from "./store.js";
+import { clearActiveMarker, deleteResult, listResults, readActiveMarker, readResult, writeActiveMarker, writeResult } from "./store.js";
 import { formatVerboseReport } from "./format.js";
 import { ProbeUserError, type PluginLogger, type ProbeConfig } from "./types.js";
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-const RESERVED_NAMES = new Set(["start", "stop", "verbose", "list"]);
+const RESERVED_NAMES = new Set(["start", "stop", "verbose", "list", "delete"]);
 const LIST_LIMIT = 50;
 
 const HELP_TEXT = [
@@ -21,9 +21,10 @@ const HELP_TEXT = [
   "  /probe <name>                           show a saved measurement as JSON",
   "  /probe verbose <name>                   show a saved measurement as an annotated report",
   `  /probe list                             list the last ${LIST_LIMIT} saved measurements, newest first`,
+  "  /probe delete <name>                    delete a saved measurement",
   "",
-  "A probe name cannot be \"start\", \"stop\", \"verbose\", or \"list\", or look like two timestamps.",
-  "Only one `start`ed measurement can be active at a time.",
+  "A probe name cannot be \"start\", \"stop\", \"verbose\", \"list\", or \"delete\", or look like two",
+  "timestamps. Only one `start`ed measurement can be active at a time.",
 ].join("\n");
 
 type Command =
@@ -34,6 +35,7 @@ type Command =
   | { type: "show"; name: string }
   | { type: "verbose"; name: string }
   | { type: "list" }
+  | { type: "delete"; name: string }
   | { type: "error"; message: string };
 
 export function parseProbeArgs(raw: string): Command {
@@ -71,6 +73,12 @@ export function parseProbeArgs(raw: string): Command {
     return { type: "list" };
   }
 
+  if (head === "delete") {
+    const name = tokens.slice(1).join(" ").trim();
+    if (!name) return { type: "error", message: "Provide a name: `/probe delete <name>`." };
+    return { type: "delete", name };
+  }
+
   if (tokens.length >= 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
     const name = tokens.slice(2).join(" ").trim();
     if (!name) return { type: "range", startIso: tokens[0], endIso: tokens[1] };
@@ -84,7 +92,7 @@ export function parseProbeArgs(raw: string): Command {
 
 function validateProbeName(name: string): string | null {
   if (RESERVED_NAMES.has(name.toLowerCase())) {
-    return `"${name}" is a reserved word and cannot be used as a probe name (start/stop/verbose/list).`;
+    return `"${name}" is a reserved word and cannot be used as a probe name (start/stop/verbose/list/delete).`;
   }
   const tokens = name.split(/\s+/);
   if (tokens.length === 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
@@ -126,7 +134,18 @@ export async function runProbeCommand(raw: string, deps: CommandDeps): Promise<s
 
     case "list":
       return handleList(deps);
+
+    case "delete":
+      return handleDelete(cmd.name, deps);
   }
+}
+
+function notFoundError(name: string): ProbeUserError {
+  return new ProbeUserError(
+    `No measurement named "${name}" was found. Matching is case-insensitive but otherwise ` +
+      `exact - use the name given to \`/probe start\`/\`/probe <start> <end> [name]\`, or the ` +
+      `auto-generated "<start> .. <end>" if no name was given for a range measurement.`,
+  );
 }
 
 async function handleStart(name: string, { paths }: CommandDeps): Promise<string> {
@@ -232,25 +251,13 @@ async function handleRange(
 
 async function handleShow(name: string, deps: CommandDeps): Promise<string> {
   const report = await readResult(deps.paths, slugify(name));
-  if (!report) {
-    throw new ProbeUserError(
-      `No measurement named "${name}" was found. Matching is case-insensitive but otherwise ` +
-        `exact - use the name given to \`/probe start\`/\`/probe <start> <end> [name]\`, or the ` +
-        `auto-generated "<start> .. <end>" if no name was given for a range measurement.`,
-    );
-  }
+  if (!report) throw notFoundError(name);
   return ["```json", JSON.stringify(report, null, 2), "```"].join("\n");
 }
 
 async function handleVerbose(name: string, deps: CommandDeps): Promise<string> {
   const report = await readResult(deps.paths, slugify(name));
-  if (!report) {
-    throw new ProbeUserError(
-      `No measurement named "${name}" was found. Matching is case-insensitive but otherwise ` +
-        `exact - use the name given to \`/probe start\`/\`/probe <start> <end> [name]\`, or the ` +
-        `auto-generated "<start> .. <end>" if no name was given for a range measurement.`,
-    );
-  }
+  if (!report) throw notFoundError(name);
   return formatVerboseReport(report);
 }
 
@@ -269,4 +276,10 @@ async function handleList(deps: CommandDeps): Promise<string> {
       ? `Newest ${summaries.length} of ${total} saved measurements:`
       : `${total} saved measurement${total === 1 ? "" : "s"}, newest first:`;
   return [header, ...lines].join("\n");
+}
+
+async function handleDelete(name: string, deps: CommandDeps): Promise<string> {
+  const deleted = await deleteResult(deps.paths, slugify(name));
+  if (!deleted) throw notFoundError(name);
+  return `Deleted measurement "${name}".`;
 }
