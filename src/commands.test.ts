@@ -71,12 +71,31 @@ describe("parseProbeArgs", () => {
     expect(parseProbeArgs("verbose my run")).toEqual({ type: "verbose", name: "my run" });
   });
 
-  it("two ISO timestamps -> range", () => {
+  it("two ISO timestamps -> range with no name", () => {
     expect(parseProbeArgs("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z")).toEqual({
       type: "range",
       startIso: "2026-08-01T00:00:00Z",
       endIso: "2026-08-02T00:00:00Z",
     });
+  });
+
+  it("two ISO timestamps plus a trailing name -> range with that name", () => {
+    expect(parseProbeArgs("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z baseline")).toEqual({
+      type: "range",
+      startIso: "2026-08-01T00:00:00Z",
+      endIso: "2026-08-02T00:00:00Z",
+      name: "baseline",
+    });
+    expect(parseProbeArgs("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z before cache change")).toEqual({
+      type: "range",
+      startIso: "2026-08-01T00:00:00Z",
+      endIso: "2026-08-02T00:00:00Z",
+      name: "before cache change",
+    });
+  });
+
+  it("range rejects a reserved word as the trailing name", () => {
+    expect(parseProbeArgs("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z stop")).toMatchObject({ type: "error" });
   });
 
   it("anything else -> show by name", () => {
@@ -141,16 +160,41 @@ describe("runProbeCommand", () => {
     ).rejects.toThrow(/No data found/);
   });
 
-  it("range with data is saved and retrievable", async () => {
+  it("range without a name is saved and retrievable by its auto-generated name (regression: save/lookup slug mismatch)", async () => {
+    // Regression test: handleRange used to slug the saved file with a timestamp-derived
+    // scheme different from the slugify(name) that handleShow/handleVerbose look up with, so
+    // a range report existed on disk but "/probe <name>" could never find it. Exercising the
+    // actual show path (not calling the range command a second time) is the point here.
+    const autoName = "2026-08-01T00:00:00Z .. 2026-08-02T00:00:00Z";
     mockedBuildReport.mockResolvedValue({
-      report: emptyReport({ probe: { name: "2026-08-01T00:00:00Z .. 2026-08-02T00:00:00Z", mode: "range", generated_at: "x" } }),
+      report: emptyReport({ probe: { name: autoName, mode: "range", generated_at: "x" } }),
       hasAnyAuditEvents: true,
     });
     const result = await runProbeCommand("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z", deps);
     expect(result).toMatch(/saved/);
+    expect(result).toContain(autoName);
 
-    const shown = await runProbeCommand("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z", deps);
+    const shown = await runProbeCommand(autoName, deps);
     expect(shown).toContain('"mode": "range"');
+    expect(shown).toContain(`"name": "${autoName}"`);
+
+    const verbose = await runProbeCommand(`verbose ${autoName}`, deps);
+    expect(verbose).toContain(`PROBE REPORT: "${autoName}"`);
+  });
+
+  it("range with an explicit trailing name is saved and retrievable by that name", async () => {
+    mockedBuildReport.mockResolvedValue({
+      report: emptyReport({ probe: { name: "baseline", mode: "range", generated_at: "x" } }),
+      hasAnyAuditEvents: true,
+    });
+    const result = await runProbeCommand("2026-08-01T00:00:00Z 2026-08-02T00:00:00Z baseline", deps);
+    expect(result).toMatch(/Measurement "baseline" saved/);
+
+    const shown = await runProbeCommand("baseline", deps);
+    expect(shown).toContain('"name": "baseline"');
+
+    const verbose = await runProbeCommand("verbose baseline", deps);
+    expect(verbose).toContain('PROBE REPORT: "baseline"');
   });
 
   it("show of an unknown name is rejected", async () => {

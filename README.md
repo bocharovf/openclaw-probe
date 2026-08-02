@@ -92,7 +92,7 @@ matching note in the report's `warnings` array.
 | --- | --- |
 | `/probe start <name>` | Start a named measurement. Fails if one is already active. |
 | `/probe stop` | Stop the active measurement, compute its report, and save it. Fails if none is active. |
-| `/probe <start> <end>` | Build (and save) a measurement for a past time range. Timestamps are ISO 8601, e.g. `2026-08-01T00:00:00Z`. |
+| `/probe <start> <end> [name]` | Build (and save) a measurement for a past time range. Timestamps are ISO 8601, e.g. `2026-08-01T00:00:00Z`. `name` is optional and defaults to `"<start> .. <end>"` if omitted. |
 | `/probe <name>` | Print a saved measurement's report as JSON. |
 | `/probe verbose <name>` | Print a saved measurement's report as an annotated, human-readable text report explaining every field. |
 | `/probe` (no args) | Print this command summary. |
@@ -103,7 +103,12 @@ another.
 
 A probe name cannot be exactly `start`, `stop`, or `verbose` (reserved words), and cannot be
 two ISO 8601 timestamps separated by whitespace (that parses as a range request instead).
-Names may contain spaces, e.g. `/probe start baseline before cache change`.
+Names may contain spaces, e.g. `/probe start baseline before cache change`. The same rules
+apply to the optional trailing name on `/probe <start> <end> [name]`.
+
+Naming a range measurement is recommended - the auto-generated `"<start> .. <end>"` name
+works but is unwieldy to type back exactly (it must match character-for-character, aside
+from case) when you later want `/probe <name>` or `/probe verbose <name>`.
 
 ### Examples
 
@@ -114,7 +119,9 @@ Names may contain spaces, e.g. `/probe start baseline before cache change`.
 /probe baseline
 /probe verbose baseline
 
-/probe 2026-08-01T00:00:00Z 2026-08-01T06:00:00Z
+/probe 2026-08-01T00:00:00Z 2026-08-01T06:00:00Z incident-postmortem
+/probe incident-postmortem
+/probe verbose incident-postmortem
 ```
 
 ### Error messages
@@ -199,7 +206,9 @@ explanation attached to every section.
 ### Field reference
 
 **`probe`** - identity of the measurement.
-- `name` - as given to `/probe start <name>`, or `"<start> .. <end>"` for a range probe.
+- `name` - as given to `/probe start <name>` or the optional trailing name on
+  `/probe <start> <end> [name]`; defaults to `"<start> .. <end>"` for a range probe with no
+  name given.
 - `mode` - `start-stop` or `range`.
 - `generated_at` - when the report was computed (can be well after `window.ts_end` for a
   range probe run long after the fact).

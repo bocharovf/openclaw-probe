@@ -12,12 +12,13 @@ const HELP_TEXT = [
   "Probe - agent run cost/speed/behavior measurement.",
   "",
   "Commands:",
-  "  /probe start <name>              start a named measurement",
-  "  /probe stop                      stop the active measurement and save its report",
-  "  /probe <start-ts> <end-ts>       build a measurement for a past time range",
-  "                                    (ISO 8601, e.g. 2026-08-01T00:00:00Z)",
-  "  /probe <name>                    show a saved measurement as JSON",
-  "  /probe verbose <name>            show a saved measurement as an annotated report",
+  "  /probe start <name>                     start a named measurement",
+  "  /probe stop                             stop the active measurement and save its report",
+  "  /probe <start-ts> <end-ts> [name]        build a measurement for a past time range",
+  "                                            (ISO 8601, e.g. 2026-08-01T00:00:00Z). Name",
+  "                                            defaults to \"<start-ts> .. <end-ts>\" if omitted.",
+  "  /probe <name>                           show a saved measurement as JSON",
+  "  /probe verbose <name>                   show a saved measurement as an annotated report",
   "",
   "A probe name cannot be \"start\", \"stop\", \"verbose\", or look like two timestamps.",
   "Only one `start`ed measurement can be active at a time.",
@@ -27,7 +28,7 @@ type Command =
   | { type: "help" }
   | { type: "start"; name: string }
   | { type: "stop" }
-  | { type: "range"; startIso: string; endIso: string }
+  | { type: "range"; startIso: string; endIso: string; name?: string }
   | { type: "show"; name: string }
   | { type: "verbose"; name: string }
   | { type: "error"; message: string };
@@ -60,8 +61,12 @@ export function parseProbeArgs(raw: string): Command {
     return { type: "verbose", name };
   }
 
-  if (tokens.length === 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
-    return { type: "range", startIso: tokens[0], endIso: tokens[1] };
+  if (tokens.length >= 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
+    const name = tokens.slice(2).join(" ").trim();
+    if (!name) return { type: "range", startIso: tokens[0], endIso: tokens[1] };
+    const nameError = validateProbeName(name);
+    if (nameError) return { type: "error", message: nameError };
+    return { type: "range", startIso: tokens[0], endIso: tokens[1], name };
   }
 
   return { type: "show", name: trimmed };
@@ -76,11 +81,6 @@ function validateProbeName(name: string): string | null {
     return `"${name}" looks like a time range, not a name - choose a name that isn't two ISO 8601 timestamps.`;
   }
   return null;
-}
-
-function rangeSlug(startMs: number, endMs: number): string {
-  const compact = (ms: number) => new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-  return `range-${compact(startMs)}-${compact(endMs)}`;
 }
 
 export type CommandDeps = {
@@ -106,7 +106,7 @@ export async function runProbeCommand(raw: string, deps: CommandDeps): Promise<s
       return handleStop(deps);
 
     case "range":
-      return handleRange(cmd.startIso, cmd.endIso, deps);
+      return handleRange(cmd.startIso, cmd.endIso, cmd.name, deps);
 
     case "show":
       return handleShow(cmd.name, deps);
@@ -165,7 +165,12 @@ async function handleStop(deps: CommandDeps): Promise<string> {
   return summary;
 }
 
-async function handleRange(startIso: string, endIso: string, deps: CommandDeps): Promise<string> {
+async function handleRange(
+  startIso: string,
+  endIso: string,
+  customName: string | undefined,
+  deps: CommandDeps,
+): Promise<string> {
   const tsStartMs = Date.parse(startIso);
   const tsEndMs = Date.parse(endIso);
   if (!Number.isFinite(tsStartMs) || !Number.isFinite(tsEndMs)) {
@@ -177,8 +182,12 @@ async function handleRange(startIso: string, endIso: string, deps: CommandDeps):
     );
   }
 
-  const slug = rangeSlug(tsStartMs, tsEndMs);
-  const name = `${startIso} .. ${endIso}`;
+  // The slug used to save a report must be the exact same function used to look one up
+  // (handleShow/handleVerbose both do slugify(name)) - otherwise a saved range report can
+  // become unreachable by name, which is what happened before this used a separate
+  // timestamp-derived slug here.
+  const name = customName ?? `${startIso} .. ${endIso}`;
+  const slug = slugify(name);
   const { report, hasAnyAuditEvents } = await buildReport({
     config: deps.config,
     paths: deps.paths,
@@ -212,8 +221,9 @@ async function handleShow(name: string, deps: CommandDeps): Promise<string> {
   const report = await readResult(deps.paths, slugify(name));
   if (!report) {
     throw new ProbeUserError(
-      `No measurement named "${name}" was found. Names are case-sensitive as given to ` +
-        `\`/probe start\`, or the exact "<start> .. <end>" range you requested earlier.`,
+      `No measurement named "${name}" was found. Matching is case-insensitive but otherwise ` +
+        `exact - use the name given to \`/probe start\`/\`/probe <start> <end> [name]\`, or the ` +
+        `auto-generated "<start> .. <end>" if no name was given for a range measurement.`,
     );
   }
   return ["```json", JSON.stringify(report, null, 2), "```"].join("\n");
@@ -223,8 +233,9 @@ async function handleVerbose(name: string, deps: CommandDeps): Promise<string> {
   const report = await readResult(deps.paths, slugify(name));
   if (!report) {
     throw new ProbeUserError(
-      `No measurement named "${name}" was found. Names are case-sensitive as given to ` +
-        `\`/probe start\`, or the exact "<start> .. <end>" range you requested earlier.`,
+      `No measurement named "${name}" was found. Matching is case-insensitive but otherwise ` +
+        `exact - use the name given to \`/probe start\`/\`/probe <start> <end> [name]\`, or the ` +
+        `auto-generated "<start> .. <end>" if no name was given for a range measurement.`,
     );
   }
   return formatVerboseReport(report);
