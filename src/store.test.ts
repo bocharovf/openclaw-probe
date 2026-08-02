@@ -33,6 +33,7 @@ function report(name: string, mode: ProbeReport["probe"]["mode"], generatedAt: s
       agent_run_errors: { count: 0, by_status: {}, by_code: {} },
     },
     llm_api_log: { entries_captured: 0, file: null },
+    events: [],
     warnings: [],
   };
 }

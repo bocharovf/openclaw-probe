@@ -219,6 +219,14 @@ explanation attached to every section.
     "entries_captured": 7,
     "file": "/root/.openclaw/state/plugins/probe/results/baseline.rawrequests.jsonl"
   },
+  "events": [
+    { "date": "2026-08-01T12:00:02.940Z", "event": "agent run: main (started, still running at window end)" },
+    { "date": "2026-08-01T12:00:15.703Z", "event": "LLM call: anthropic/claude-x (with tool call)" },
+    { "date": "2026-08-01T12:00:15.900Z", "event": "tool call: read (0.2s)" },
+    { "date": "2026-08-01T12:00:22.150Z", "event": "skill used: aiops-incident" },
+    { "date": "2026-08-01T12:03:41.100Z", "event": "tool call: postgres_query (failed: connection_refused, 0.3s)" },
+    { "date": "2026-08-01T12:03:41.210Z", "event": "agent run: main (41.7s)" }
+  ],
   "warnings": []
 }
 ```
@@ -287,6 +295,28 @@ prompt/prompt/history, response text, usage, duration) - **not** one per `iterat
 see [Requirements](#requirements). `null`/`0` when raw capture is disabled or not authorized,
 or simply had nothing to capture. This is purely archival for close inspection of prompts -
 none of the numeric metrics above depend on it.
+
+**`events`** - a chronological timeline merging everything else in the report into one log:
+`{ "date": "<ISO timestamp>", "event": "<short description>" }` entries, sorted ascending.
+One entry per:
+- completed agent run - `"agent run: <agentId> (<duration>)"`, or with a status/error code
+  suffix on failure, or `"(started, still running at window end)"` if it never finished
+  inside the window (also true for sub-agent runs - each has its own `agentId`, so a
+  sub-agent spawn shows up as its own `agent run: <sub-agent id>` entry alongside the
+  `tool call: sessions_spawn` entry that triggered it);
+- completed tool call - `"tool call: <name> (<duration>)"`, with the same failure/still-running
+  suffixes as agent runs;
+- LLM call - `"LLM call: <provider>/<model>"`, with `" (with tool call)"` appended when that
+  completion produced a tool call;
+- skill use - `"skill used: <name>"`.
+
+There is no separate `"date"`/`"time"` split and no cap on array length - a busy scenario
+(many tool calls, several sub-agents) produces a correspondingly long list. Useful for
+reconstructing what actually happened in a scenario at a glance, without cross-referencing
+`tools_used`/`models_used`/`skills_used` and the raw audit ledger by hand. The tool-call
+entries never include call arguments or results (the audit ledger that backs them is
+metadata-only by design - see [Data sources](#data-sources)), only the tool name, outcome,
+and duration.
 
 **`warnings`** - non-fatal notes, e.g. a run's trajectory file was rotated/deleted before the
 report could read it.

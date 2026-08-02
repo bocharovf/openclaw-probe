@@ -81,7 +81,7 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-type SkillUsageEventRecord = {
+export type SkillUsageEventRecord = {
   observedAt: string;
   skillId: string;
   skillName: string;
@@ -130,23 +130,22 @@ export function registerSkillCapture(
   logger.info(`[probe] skill usage detection armed -> ${skillLogDir}`);
 }
 
-/** Windowed skill usage counts from probe's own log, filtered by `observedAt`. Always
- * returns an object (never null) - a missing/empty log directory just means no skill use has
- * been observed yet, not "unavailable". Works the same for start/stop and historical date
- * ranges, since events carry their own timestamp rather than being a cumulative counter. */
-export async function collectSkillUsage(
+/** Windowed, individual skill-usage events from probe's own log, filtered by `observedAt`.
+ * Unsorted (callers merging this into a larger timeline sort once at the end). Returns `[]`
+ * for a missing/empty log directory - that just means no skill use has been observed yet. */
+export async function collectSkillUsageEvents(
   skillLogDir: string,
   tsStartMs: number,
   tsEndMs: number,
-): Promise<Record<string, SkillUsageEntry>> {
+): Promise<SkillUsageEventRecord[]> {
   let files: string[];
   try {
     files = (await readdir(skillLogDir)).filter((f) => f.endsWith(".jsonl"));
   } catch {
-    return {};
+    return [];
   }
 
-  const counts = new Map<string, SkillUsageEntry>();
+  const events: SkillUsageEventRecord[] = [];
   for (const file of files) {
     const text = await readFile(join(skillLogDir, file), "utf-8").catch(() => "");
     for (const line of text.split("\n")) {
@@ -160,10 +159,26 @@ export async function collectSkillUsage(
       }
       const observedMs = Date.parse(event.observedAt);
       if (!Number.isFinite(observedMs) || observedMs < tsStartMs || observedMs > tsEndMs) continue;
-      const entry = counts.get(event.skillId) ?? { name: event.skillName, uses: 0 };
-      entry.uses += 1;
-      counts.set(event.skillId, entry);
+      events.push(event);
     }
+  }
+  return events;
+}
+
+/** Windowed skill usage counts, aggregated from `collectSkillUsageEvents`. Always returns an
+ * object (never null) - works the same for start/stop and historical date ranges, since
+ * events carry their own timestamp rather than being a cumulative counter. */
+export async function collectSkillUsage(
+  skillLogDir: string,
+  tsStartMs: number,
+  tsEndMs: number,
+): Promise<Record<string, SkillUsageEntry>> {
+  const events = await collectSkillUsageEvents(skillLogDir, tsStartMs, tsEndMs);
+  const counts = new Map<string, SkillUsageEntry>();
+  for (const event of events) {
+    const entry = counts.get(event.skillId) ?? { name: event.skillName, uses: 0 };
+    entry.uses += 1;
+    counts.set(event.skillId, entry);
   }
   return Object.fromEntries(counts);
 }

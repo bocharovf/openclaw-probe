@@ -2,9 +2,9 @@ import { fetchAuditEvents, fetchToolToPluginMap } from "./cli.js";
 import { collectRawLlmEntries, writeRawLlmEntriesFile } from "./llmCapture.js";
 import type { ProbePaths } from "./paths.js";
 import { rawRequestsPath } from "./store.js";
-import { collectSkillUsage } from "./skillUsage.js";
+import { collectSkillUsageEvents } from "./skillUsage.js";
 import { extractSystemPromptChars, findContextCompiledNear, findModelCompleted } from "./trajectory.js";
-import type { AuditEvent, ProbeConfig, ProbeMode, ProbeReport, RunWindow } from "./types.js";
+import type { AuditEvent, ProbeConfig, ProbeEvent, ProbeMode, ProbeReport, RunWindow, SkillUsageEntry } from "./types.js";
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -12,6 +12,19 @@ function iso(ms: number): string {
 
 function bump(map: Record<string, number>, key: string, by = 1): void {
   map[key] = (map[key] ?? 0) + by;
+}
+
+function fmtDuration(ms: number): string {
+  return `${Math.round((ms / 1000) * 100) / 100}s`;
+}
+
+/** Formats the "(status, duration)" suffix for a timeline entry - empty string when the
+ * outcome was a plain success and no duration is known, so the common case stays terse. */
+function describeOutcome(status: string, errorCode: string | undefined, durationMs: number | undefined): string {
+  const parts: string[] = [];
+  if (status !== "succeeded") parts.push(errorCode ? `${status}: ${errorCode}` : status);
+  if (durationMs !== undefined) parts.push(fmtDuration(durationMs));
+  return parts.length ? ` (${parts.join(", ")})` : "";
 }
 
 /** Collapses started/finished audit events into one pair per correlation key (runId or
@@ -62,6 +75,9 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
 
   const sessionIds = [...new Set(events.map((e) => e.sessionId).filter((v): v is string => !!v))].sort();
 
+  // ---- events timeline (one line per agent run / tool call / LLM call / skill use) ----
+  const timeline: ProbeEvent[] = [];
+
   // ---- time ----
   let agentActiveMs = 0;
   const runWindows: RunWindow[] = [];
@@ -69,6 +85,17 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   const agentRunErrorsByCode: Record<string, number> = {};
   for (const pair of runs.values()) {
     const { started, finished } = pair;
+    const agentId = (finished ?? started)?.agentId ?? "unknown";
+    if (started && finished) {
+      timeline.push({
+        date: iso(finished.occurredAt),
+        event: `agent run: ${agentId}${describeOutcome(finished.status, finished.errorCode, finished.occurredAt - started.occurredAt)}`,
+      });
+    } else if (finished) {
+      timeline.push({ date: iso(finished.occurredAt), event: `agent run: ${agentId}${describeOutcome(finished.status, finished.errorCode, undefined)}` });
+    } else if (started) {
+      timeline.push({ date: iso(started.occurredAt), event: `agent run: ${agentId} (started, still running at window end)` });
+    }
     if (!started || !finished) continue; // still in flight at window close
     const duration = finished.occurredAt - started.occurredAt;
     agentActiveMs += duration;
@@ -94,6 +121,16 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     const { started, finished } = pair;
     const toolName = (finished ?? started)?.toolName ?? "unknown";
     bump(toolsUsed, toolName);
+    if (started && finished) {
+      timeline.push({
+        date: iso(finished.occurredAt),
+        event: `tool call: ${toolName}${describeOutcome(finished.status, finished.errorCode, finished.occurredAt - started.occurredAt)}`,
+      });
+    } else if (finished) {
+      timeline.push({ date: iso(finished.occurredAt), event: `tool call: ${toolName}${describeOutcome(finished.status, finished.errorCode, undefined)}` });
+    } else if (started) {
+      timeline.push({ date: iso(started.occurredAt), event: `tool call: ${toolName} (started, still running at window end)` });
+    }
     if (started && finished) toolExecMs += finished.occurredAt - started.occurredAt;
     if (finished && finished.status !== "succeeded") {
       bump(toolErrorsByTool, toolName);
@@ -136,11 +173,13 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       if (ts === undefined || ts < rw.startedMs - 1000 || ts > rw.finishedMs + 1000) continue;
       llmCalls += 1;
       const content = (m.content as Array<Record<string, unknown>> | undefined) ?? [];
-      if (content.some((c) => c?.type === "toolCall")) toolRounds += 1;
+      const hadToolCall = content.some((c) => c?.type === "toolCall");
+      if (hadToolCall) toolRounds += 1;
       const provider = m.provider as string | undefined;
       const model = m.model as string | undefined;
       const key = provider && model ? `${provider}/${model}` : runLevelModel;
       bump(modelsUsed, key ?? "unknown");
+      timeline.push({ date: iso(ts), event: `LLM call: ${key ?? "unknown"}${hadToolCall ? " (with tool call)" : ""}` });
     }
 
     const cc = await findContextCompiledNear(paths.agentsDir, rw.agentId, rw.sessionId, rw.runId);
@@ -149,7 +188,14 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   }
 
   // ---- skills (windowed from probe's own after_tool_call-based detection log) ----
-  const skillsUsed = await collectSkillUsage(paths.skillLogDir, tsStartMs, tsEndMs);
+  const skillUsageEvents = await collectSkillUsageEvents(paths.skillLogDir, tsStartMs, tsEndMs);
+  const skillsUsed: Record<string, SkillUsageEntry> = {};
+  for (const event of skillUsageEvents) {
+    const entry = skillsUsed[event.skillId] ?? { name: event.skillName, uses: 0 };
+    entry.uses += 1;
+    skillsUsed[event.skillId] = entry;
+    timeline.push({ date: event.observedAt, event: `skill used: ${event.skillName}` });
+  }
 
   // ---- tool -> plugin ownership ----
   const toolToPlugin = await fetchToolToPluginMap(config).catch(() => new Map<string, string>());
@@ -211,6 +257,7 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       },
     },
     llm_api_log: { entries_captured: rawEntries.length, file: rawFile },
+    events: timeline.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)),
     warnings,
   };
 

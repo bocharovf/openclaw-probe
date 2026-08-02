@@ -152,6 +152,15 @@ export function formatVerboseReport(r: ProbeReport): string {
     ].join("\n"),
   );
 
+  sections.push(
+    [
+      "## Events",
+      `Chronological log of everything else in this report, one line per agent run / tool call / LLM call / skill use (${r.events.length} entries).`,
+      r.events.length ? r.events.map((e) => `  ${e.date}  ${e.event}`).join("\n") : "  none",
+      "Source: the same audit-ledger, trajectory, and skill-usage data as the sections above, merged into one timeline and sorted by timestamp.",
+    ].join("\n"),
+  );
+
   if (r.warnings.length) {
     sections.push(["## Warnings", ...r.warnings.map((w) => `  - ${w}`)].join("\n"));
   }
