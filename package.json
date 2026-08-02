@@ -1,0 +1,31 @@
+{
+  "name": "openclaw-plugin-probe",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin that measures agent run cost, speed, and behavior over a time window - tokens, wall-clock/LLM/tool time, tool and skill usage, errors, and raw LLM request/response archival - for before/after experiments.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "plugin:install": "npm run build && openclaw plugins install . --force",
+    "test": "vitest run --config ./vitest.config.ts"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "devDependencies": {
+    "openclaw": "latest",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

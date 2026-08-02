@@ -1,0 +1,76 @@
+{
+  "id": "probe",
+  "name": "Probe",
+  "description": "Measures agent run cost, speed, and behavior over a time window (tokens, time breakdown, tool/skill usage, errors, raw LLM request/response archive) via /probe chat commands, for before/after experiments on agent changes.",
+  "version": "0.1.0",
+  "hooks": ["llm_input", "llm_output"],
+  "uiHints": {
+    "openclawBin": {
+      "label": "OpenClaw CLI binary",
+      "placeholder": "openclaw",
+      "help": "Binary name or path used to shell out to `openclaw audit --json` and `openclaw plugins list --json`. Change only if `openclaw` is not on PATH for the Gateway process."
+    },
+    "cliTimeoutMs": {
+      "label": "CLI call timeout (ms)",
+      "placeholder": "30000",
+      "help": "Timeout for each `openclaw audit`/`openclaw plugins list` subprocess call."
+    },
+    "llmLog.enabled": {
+      "label": "Capture raw LLM request/response",
+      "help": "Hook llm_input/llm_output to archive full request/response payloads per probe window. Requires plugins.entries.probe.hooks.allowConversationAccess=true in config - see README. Core metrics (tokens, time, tool/skill usage, errors) work without this."
+    },
+    "llmLog.maxFileSizeMb": {
+      "label": "Max raw log file size (MB)",
+      "placeholder": "20",
+      "help": "Rotate the day's raw LLM log file once it exceeds this size."
+    },
+    "llmLog.maxFiles": {
+      "label": "Max rotated raw log files",
+      "placeholder": "14",
+      "help": "How many rotated raw LLM log files to keep before deleting the oldest."
+    },
+    "llmLog.redactSecrets": {
+      "label": "Redact secret-shaped values",
+      "help": "Redact values that look like API keys/tokens/JWTs in the captured raw request/response before writing to disk (recommended)."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "openclawBin": {
+        "type": "string",
+        "default": "openclaw"
+      },
+      "cliTimeoutMs": {
+        "type": "number",
+        "default": 30000
+      },
+      "llmLog": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxFileSizeMb": {
+            "type": "number",
+            "default": 20
+          },
+          "maxFiles": {
+            "type": "number",
+            "default": 14
+          },
+          "redactSecrets": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  }
+}
