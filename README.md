@@ -28,12 +28,44 @@ npm run build
 openclaw plugins install . --force
 ```
 
-### Enable raw LLM request/response capture (optional)
+## Requirements
 
-Probe's core metrics (time, tokens, tool/skill usage, errors) work out of the box. The
-**optional** raw request/response archive (full system prompt/prompt/response text for
-every LLM call in a probe's window) uses the `llm_input`/`llm_output` hooks, which OpenClaw
-gates behind an explicit opt-in for any plugin that isn't bundled with OpenClaw itself:
+Probe reads from several OpenClaw subsystems (chat commands, the audit ledger, trajectory
+files, the `skill-usage` plugin, its own hooks). Each has its own config gate. This section
+lists what has to be true on the host for `/probe` to work at all, and separately, what each
+*optional* piece of the report additionally needs - so a report that is missing a field is
+easy to diagnose instead of looking like a bug.
+
+### Required - without these, `/probe` does not run at all
+
+| Setting | Needed because | Symptom if missing/wrong |
+| --- | --- | --- |
+| `plugins.allow` includes `"probe"` | Plugin must be allowlisted to load. | Plugin never loads; no `/probe` command exists. |
+| `plugins.entries.probe.enabled: true` | Explicit enable (set automatically by `openclaw plugins install`). | Same as above. |
+| `commands.text` is not `false` (default `true`) | `/...` chat commands are only parsed when text-command parsing is on. | `/probe ...` is treated as a normal chat message and goes to the model instead of the plugin (it will typically reply something like it doesn't recognize the command, or - if you've added the `agentPromptGuidance` this plugin ships - decline to answer). |
+| The sender is authorized | The command sets `requireAuth: true` (default for chat commands). Authorization comes from `commands.allowFrom`, or otherwise from channel allowlists/pairing plus `commands.useAccessGroups`. | Unauthorized senders get no response; the command is silently ignored. |
+| `openclaw` is reachable in `PATH` for the Gateway process | Probe shells out to `openclaw audit --json` and `openclaw plugins list --json` for every report (see [Data sources](#data-sources)). | `/probe stop` / `/probe <range>` fails with a "Probe command failed" error instead of a report. Point `plugins.entries.probe.config.openclawBin` at an explicit path if `openclaw` isn't on the Gateway's `PATH`. |
+
+### Required for the core metrics (time, tokens, tool/skill usage, errors)
+
+| Setting | Needed because | Symptom if missing/wrong |
+| --- | --- | --- |
+| `audit.enabled` is not `false` (default `true`) | `time`, `iterations`, `errors`, `sessions`, and `tools_used` all come from the audit ledger - there is no other source for them. | Every report has zeroed-out `time`/`iterations`/`errors`, empty `sessions`/`tools_used`, and `/probe <start> <end>` for that window fails with the "No data found" error (see [Error messages](#error-messages)). `/probe start`/`stop` still "succeeds" but the report is empty. |
+| The probed window is inside the audit ledger's retention (**30 days / 100,000 rows**, not configurable) | Older records are pruned; there's nothing to read. | Same "No data found" error for `/probe <start> <end>` on an old range. Always use `/probe start`/`stop` for anything you want reliably measured, and treat `/probe <start> <end>` as best-effort for anything more than a few days old. |
+| Trajectory sidecar files for the involved runs still exist on disk (written automatically, no on/off switch - but `session.maintenance` can prune old ones as part of its retention/disk-budget cleanup) | `tokens`, `models_used`, `context`, and `llm_calls`/`tool_calling_rounds` come from each run's `<agent>/sessions/<session>.trajectory.jsonl`. | Those fields undercount or stay at `0` for the affected runs, and the report's `warnings` array names the run id it couldn't find a trajectory for. `time`/`iterations`/`errors`/`tools_used` are unaffected (audit-ledger-only). |
+
+### Optional - `skills_used`
+
+| Setting | Needed because | Symptom if missing/wrong |
+| --- | --- | --- |
+| The bundled `skill-usage` plugin is installed and enabled (`plugins.allow` includes `"skill-usage"`, `plugins.entries.skill-usage.enabled: true`) | `skills_used` is read from that plugin's own event log; probe does not track skill usage itself. | `skills_used` is `null` (not `{}` - distinguishable from "present but zero uses") and a note appears in `warnings`. Every other field is unaffected. |
+
+### Optional - raw LLM request/response archive (`llm_api_log`)
+
+| Setting | Needed because | Symptom if missing/wrong |
+| --- | --- | --- |
+| `plugins.entries.probe.hooks.allowConversationAccess: true` | OpenClaw gates the `llm_input`/`llm_output` hooks behind an explicit opt-in for any plugin that isn't bundled with OpenClaw itself - without it, the host simply never invokes them. | `llm_api_log.entries_captured` is always `0` and `.file` is always `null`. Nothing else in the report is affected. |
+| `plugins.entries.probe.config.llmLog.enabled` is not `false` (default `true`) | Plugin-side switch for the same capture. | Same as above. |
 
 ```json5
 {
@@ -49,8 +81,10 @@ gates behind an explicit opt-in for any plugin that isn't bundled with OpenClaw 
 }
 ```
 
-Without this, `/probe` still works fully - `llm_api_log.entries_captured` will just be `0`
-and `llm_api_log.file` will be `null` in every report, with a note in `warnings`.
+None of the optional items above affect whether `/probe` runs or whether the core metrics
+(time, tokens, tool/skill usage, errors) are correct - they only control whether one
+specific field is populated or falls back to `null`/`0`/an empty object, always with a
+matching note in the report's `warnings` array.
 
 ## Commands
 
@@ -222,7 +256,7 @@ broken down by tool/status/error code.
 **`llm_api_log`** - `entries_captured` and the path to a `.rawrequests.jsonl` file with the
 full request/response for every LLM call in the window (one JSON object per line: provider,
 model, full system prompt/prompt/history, response text, usage, duration). `null`/`0` when
-raw capture is disabled or not authorized (see [Enable raw capture](#enable-raw-llm-requestresponse-capture-optional)),
+raw capture is disabled or not authorized (see [Requirements](#requirements)),
 or simply had nothing to capture. This is purely archival for close inspection of prompts -
 none of the numeric metrics above depend on it.
 
