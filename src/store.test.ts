@@ -1,10 +1,10 @@
-import { access, mkdtemp, rm, writeFile as writeFileRaw } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile as writeFileRaw } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolvePaths } from "./paths.js";
-import { deleteResult, listResults, rawRequestsPath, readResult, writeResult } from "./store.js";
-import type { ProbeReport } from "./types.js";
+import { deleteResult, diffResultPath, listResults, rawRequestsPath, readResult, writeDiffResult, writeResult } from "./store.js";
+import type { ProbeDiffReport, ProbeReport } from "./types.js";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -99,6 +99,73 @@ describe("listResults", () => {
     const { summaries, total } = await listResults(paths, 50);
     expect(total).toBe(1);
     expect(summaries[0].name).toBe("good");
+  });
+
+  it("excludes .diff.json comparison reports", async () => {
+    await writeResult(paths, "before", report("before", "start-stop", "2026-08-01T00:00:00.000Z"));
+    await writeResult(paths, "after", report("after", "start-stop", "2026-08-02T00:00:00.000Z"));
+    await writeDiffResult(paths, "before", "after", diffReport());
+
+    const { summaries, total } = await listResults(paths, 50);
+    expect(total).toBe(2);
+    expect(summaries.map((s) => s.name).sort()).toEqual(["after", "before"]);
+  });
+});
+
+function diffReport(): ProbeDiffReport {
+  const numeric = { name1: 0, name2: 0, diff: 0 };
+  const set = { added: [], removed: [] };
+  return {
+    diff: { generated_at: "2026-08-01T00:00:00.000Z", result_file: "/x/before.after.diff.json" },
+    compared: {
+      name1: { name: "before", slug: "before", mode: "start-stop", generated_at: "x", ts_start: "x", ts_end: "x" },
+      name2: { name: "after", slug: "after", mode: "start-stop", generated_at: "x", ts_start: "x", ts_end: "x" },
+    },
+    window: { wall_clock_sec: numeric },
+    sessions: { session_ids: set, agents_used: set },
+    time: { agent_active_sec: numeric, llm_latency_sec: numeric, tool_exec_sec: numeric },
+    iterations: { agent_runs: numeric, llm_calls: numeric, tool_calling_rounds: numeric, tool_calls_total: numeric },
+    models_used: set,
+    tokens: { input: numeric, output: numeric, cacheRead: numeric, cacheWrite: numeric, reasoningTokens: numeric, total: numeric },
+    context: { system_prompt_chars_avg: numeric },
+    tools_used: set,
+    plugins_used: set,
+    skills_used: set,
+    errors: {
+      tool_call_errors: { count: numeric, by_tool: set, by_status: set, by_code: set },
+      agent_run_errors: { count: numeric, by_status: set, by_code: set },
+    },
+    llm_api_log: { entries_captured: numeric },
+    events: set,
+    warnings: set,
+  };
+}
+
+describe("diffResultPath / writeDiffResult", () => {
+  let baseDir: string;
+  let paths: ReturnType<typeof resolvePaths>;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "probe-diff-store-"));
+    paths = resolvePaths(baseDir);
+  });
+
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it("names the file <slug1>.<slug2>.diff.json in the results dir", () => {
+    const path = diffResultPath(paths, "before", "after");
+    expect(path).toBe(join(paths.probeResultsDir, "before.after.diff.json"));
+  });
+
+  it("writeDiffResult creates the results dir and writes valid JSON at that path", async () => {
+    const written = await writeDiffResult(paths, "before", "after", diffReport());
+    expect(written).toBe(diffResultPath(paths, "before", "after"));
+
+    const saved = JSON.parse(await readFile(written, "utf-8"));
+    expect(saved.compared.name1.name).toBe("before");
+    expect(saved.compared.name2.name).toBe("after");
   });
 });
 

@@ -52,14 +52,17 @@ const entry: OpenClawPluginDefinition = definePluginEntry({
 
     api.registerCommand({
       name: "probe",
-      description: "Measure agent run cost/speed/behavior: start/stop, a past time range, list, delete, or show a saved report.",
+      description: "Measure agent run cost/speed/behavior: start/stop, a past time range, list, delete, diff, or show a saved report.",
       acceptsArgs: true,
       requireAuth: true,
       agentPromptGuidance: [
         "The /probe command family (start/stop/<range>/<name>/verbose <name>/list/delete " +
-          "<name>) measures agent run cost, speed, and tool/skill/token usage over a time " +
-          "window for experiments. It bypasses the model - do not try to answer /probe " +
-          "requests yourself; the user runs it directly.",
+          "<name>/diff <name1>, <name2>/diff verbose <name1>, <name2>) measures agent run " +
+          "cost, speed, and tool/skill/token usage over a time window for experiments, and " +
+          "can compare two saved measurements field by field (numeric fields as name2-name1, " +
+          "used-tool/plugin/skill/model/event lists as a +added/-removed set difference). It " +
+          "bypasses the model - do not try to answer /probe requests yourself; the user runs " +
+          "it directly.",
       ],
       async handler(ctx: { args?: string }) {
         try {

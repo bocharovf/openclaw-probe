@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseProbeArgs, runProbeCommand } from "./commands.js";
 import { resolvePaths } from "./paths.js";
+import { diffResultPath } from "./store.js";
 import { DEFAULT_CONFIG } from "./types.js";
 
 vi.mock("./report.js", () => ({
@@ -117,6 +118,49 @@ describe("parseProbeArgs", () => {
   it("anything else -> show by name", () => {
     expect(parseProbeArgs("my cool experiment")).toEqual({ type: "show", name: "my cool experiment" });
     expect(parseProbeArgs("baseline")).toEqual({ type: "show", name: "baseline" });
+  });
+
+  it("diff requires two comma-separated names", () => {
+    expect(parseProbeArgs("diff")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("diff baseline")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("diff baseline after")).toMatchObject({ type: "error" });
+  });
+
+  it("diff <name1>, <name2>", () => {
+    expect(parseProbeArgs("diff baseline, after")).toEqual({
+      type: "diff",
+      name1: "baseline",
+      name2: "after",
+      verbose: false,
+    });
+  });
+
+  it("diff names may contain spaces on either side of the comma", () => {
+    expect(parseProbeArgs("diff before cache change, after cache change")).toEqual({
+      type: "diff",
+      name1: "before cache change",
+      name2: "after cache change",
+      verbose: false,
+    });
+  });
+
+  it("diff rejects an empty name on either side of the comma", () => {
+    expect(parseProbeArgs("diff , after")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("diff baseline ,")).toMatchObject({ type: "error" });
+  });
+
+  it("diff verbose <name1>, <name2>", () => {
+    expect(parseProbeArgs("diff verbose baseline, after")).toEqual({
+      type: "diff",
+      name1: "baseline",
+      name2: "after",
+      verbose: true,
+    });
+  });
+
+  it("diff verbose requires two comma-separated names", () => {
+    expect(parseProbeArgs("diff verbose")).toMatchObject({ type: "error" });
+    expect(parseProbeArgs("diff verbose baseline after")).toMatchObject({ type: "error" });
   });
 });
 
@@ -305,5 +349,80 @@ describe("runProbeCommand", () => {
 
     await expect(runProbeCommand("delete-me", deps)).rejects.toThrow(/No measurement named/);
     expect(await runProbeCommand("keep-me", deps)).toContain('"name": "keep-me"');
+  });
+
+  describe("diff", () => {
+    async function saveMeasurement(name: string, overrides: Partial<ReturnType<typeof emptyReport>> = {}) {
+      mockedBuildReport.mockResolvedValueOnce({
+        report: emptyReport({ probe: { name, mode: "start-stop", generated_at: "2026-08-01T00:00:00.000Z" }, ...overrides }),
+        hasAnyAuditEvents: true,
+      });
+      await runProbeCommand(`start ${name}`, deps);
+      await runProbeCommand("stop", deps);
+    }
+
+    it("rejects when name1 does not exist", async () => {
+      await saveMeasurement("after");
+      await expect(runProbeCommand("diff before, after", deps)).rejects.toThrow(/No measurement named "before"/);
+    });
+
+    it("rejects when name2 does not exist", async () => {
+      await saveMeasurement("before");
+      await expect(runProbeCommand("diff before, after", deps)).rejects.toThrow(/No measurement named "after"/);
+    });
+
+    it("rejects a saved file that is not valid JSON", async () => {
+      await saveMeasurement("good");
+      await mkdir(deps.paths.probeResultsDir, { recursive: true });
+      await writeFile(join(deps.paths.probeResultsDir, "broken.json"), "{not valid json");
+
+      await expect(runProbeCommand("diff broken, good", deps)).rejects.toThrow(/could not be read as JSON/);
+    });
+
+    it("rejects a saved file with valid JSON but a missing required field", async () => {
+      await saveMeasurement("good");
+      await mkdir(deps.paths.probeResultsDir, { recursive: true });
+      await writeFile(
+        join(deps.paths.probeResultsDir, "incomplete.json"),
+        JSON.stringify({ probe: { name: "incomplete", mode: "start-stop", generated_at: "x" } }),
+      );
+
+      await expect(runProbeCommand("diff incomplete, good", deps)).rejects.toThrow(/missing the expected field/);
+    });
+
+    it("computes and saves a diff, printed as JSON", async () => {
+      await saveMeasurement("before", { tools_used: { read: 1 }, tokens: { total: 100 } });
+      await saveMeasurement("after", { tools_used: { k8s_get_pods: 1 }, tokens: { total: 150 } });
+
+      const result = await runProbeCommand("diff before, after", deps);
+      expect(result).toContain("Diff \"before\" -> \"after\" saved to");
+      expect(result).toContain('"added": [\n      "k8s_get_pods"\n    ]');
+
+      const savedPath = diffResultPath(deps.paths, "before", "after");
+      const saved = JSON.parse(await readFile(savedPath, "utf-8"));
+      expect(saved.tools_used).toEqual({ added: ["k8s_get_pods"], removed: ["read"] });
+      expect(saved.tokens.total).toEqual({ name1: 100, name2: 150, diff: 50 });
+      expect(saved.compared.name1.name).toBe("before");
+      expect(saved.compared.name2.name).toBe("after");
+    });
+
+    it("diff verbose renders an annotated text report instead of JSON", async () => {
+      await saveMeasurement("before");
+      await saveMeasurement("after");
+
+      const result = await runProbeCommand("diff verbose before, after", deps);
+      expect(result).toContain('PROBE DIFF: "before" (name1) -> "after" (name2)');
+      expect(result).not.toContain("```json");
+    });
+
+    it("diff result files are excluded from /probe list", async () => {
+      await saveMeasurement("before");
+      await saveMeasurement("after");
+      await runProbeCommand("diff before, after", deps);
+
+      const list = await runProbeCommand("list", deps);
+      expect(list).toMatch(/2 saved measurements, newest first/);
+      expect(list).not.toContain("before.after.diff");
+    });
   });
 });

@@ -1,4 +1,4 @@
-import type { ProbeReport } from "./types.js";
+import type { DiffNumeric, DiffSet, ProbeDiffReport, ProbeReport } from "./types.js";
 
 function fmtRecord(rec: Record<string, number>, emptyText: string): string {
   const entries = Object.entries(rec);
@@ -164,6 +164,130 @@ export function formatVerboseReport(r: ProbeReport): string {
   if (r.warnings.length) {
     sections.push(["## Warnings", ...r.warnings.map((w) => `  - ${w}`)].join("\n"));
   }
+
+  return sections.join("\n\n");
+}
+
+function fmtNumericLine(label: string, d: DiffNumeric): string {
+  if (d.name1 === null || d.name2 === null) {
+    return `  ${label}: n/a (name1=${d.name1 ?? "null"}, name2=${d.name2 ?? "null"})`;
+  }
+  const sign = d.diff !== null && d.diff > 0 ? "+" : "";
+  return `  ${label}: ${d.name1} -> ${d.name2}  (diff: ${sign}${d.diff})`;
+}
+
+function fmtSetLines(label: string, s: DiffSet): string {
+  if (!s.added.length && !s.removed.length) return `  ${label}: no changes`;
+  const lines = [`  ${label}:`];
+  for (const v of s.added) lines.push(`    +${v}`);
+  for (const v of s.removed) lines.push(`    -${v}`);
+  return lines.join("\n");
+}
+
+/** Renders a saved `/probe diff` result as a human-readable text report. Mirrors
+ * `formatVerboseReport`'s section layout so the two are easy to read side by side. Every
+ * numeric line's diff is `name2 - name1`; every list line is a set difference name2-name1
+ * with `+`/`-` prefixes (counts discarded) - see `DiffNumeric`/`DiffSet` in types.ts. */
+export function formatVerboseDiff(d: ProbeDiffReport): string {
+  const sections: string[] = [];
+
+  sections.push(
+    [
+      `PROBE DIFF: "${d.compared.name1.name}" (name1) -> "${d.compared.name2.name}" (name2)`,
+      `generated: ${d.diff.generated_at}`,
+      `saved to: ${d.diff.result_file}`,
+      "Numeric fields below show name1 -> name2 and diff = name2 - name1. List fields show a set",
+      "difference name2-name1: \"+x\" means x is in name2 but not name1, \"-x\" the reverse.",
+    ].join("\n"),
+  );
+
+  sections.push(
+    [
+      "## Compared measurements",
+      `name1: "${d.compared.name1.name}" (${d.compared.name1.slug}) - mode: ${d.compared.name1.mode}, generated: ${d.compared.name1.generated_at}, window: ${d.compared.name1.ts_start} .. ${d.compared.name1.ts_end}`,
+      `name2: "${d.compared.name2.name}" (${d.compared.name2.slug}) - mode: ${d.compared.name2.mode}, generated: ${d.compared.name2.generated_at}, window: ${d.compared.name2.ts_start} .. ${d.compared.name2.ts_end}`,
+      "Names, modes, generated-at, and window start/end are informational only and are not diffed.",
+    ].join("\n"),
+  );
+
+  sections.push(["## Window", fmtNumericLine("wall_clock_sec", d.window.wall_clock_sec)].join("\n"));
+
+  sections.push(
+    [
+      "## Sessions & agents",
+      fmtSetLines("session_ids", d.sessions.session_ids),
+      fmtSetLines("agents_used", d.sessions.agents_used),
+    ].join("\n"),
+  );
+
+  sections.push(
+    [
+      "## Time breakdown",
+      fmtNumericLine("agent_active_sec", d.time.agent_active_sec),
+      fmtNumericLine("llm_latency_sec", d.time.llm_latency_sec),
+      fmtNumericLine("tool_exec_sec", d.time.tool_exec_sec),
+    ].join("\n"),
+  );
+
+  sections.push(
+    [
+      "## Iterations",
+      fmtNumericLine("agent_runs", d.iterations.agent_runs),
+      fmtNumericLine("llm_calls", d.iterations.llm_calls),
+      fmtNumericLine("tool_calling_rounds", d.iterations.tool_calling_rounds),
+      fmtNumericLine("tool_calls_total", d.iterations.tool_calls_total),
+    ].join("\n"),
+  );
+
+  sections.push(["## Models used", fmtSetLines("models_used", d.models_used)].join("\n"));
+
+  sections.push(
+    [
+      "## Tokens",
+      fmtNumericLine("input", d.tokens.input),
+      fmtNumericLine("output", d.tokens.output),
+      fmtNumericLine("cacheRead", d.tokens.cacheRead),
+      fmtNumericLine("cacheWrite", d.tokens.cacheWrite),
+      fmtNumericLine("reasoningTokens", d.tokens.reasoningTokens),
+      fmtNumericLine("total", d.tokens.total),
+    ].join("\n"),
+  );
+
+  sections.push(["## Context size", fmtNumericLine("system_prompt_chars_avg", d.context.system_prompt_chars_avg)].join("\n"));
+
+  sections.push(["## Tools used", fmtSetLines("tools_used", d.tools_used)].join("\n"));
+  sections.push(["## Plugins used", fmtSetLines("plugins_used", d.plugins_used)].join("\n"));
+  sections.push(["## Skills used", fmtSetLines("skills_used", d.skills_used)].join("\n"));
+
+  sections.push(
+    [
+      "## Errors",
+      "tool_call_errors:",
+      fmtNumericLine("  count", d.errors.tool_call_errors.count),
+      fmtSetLines("  by_tool", d.errors.tool_call_errors.by_tool),
+      fmtSetLines("  by_status", d.errors.tool_call_errors.by_status),
+      fmtSetLines("  by_code", d.errors.tool_call_errors.by_code),
+      "agent_run_errors:",
+      fmtNumericLine("  count", d.errors.agent_run_errors.count),
+      fmtSetLines("  by_status", d.errors.agent_run_errors.by_status),
+      fmtSetLines("  by_code", d.errors.agent_run_errors.by_code),
+    ].join("\n"),
+  );
+
+  sections.push(["## Raw LLM request/response log", fmtNumericLine("entries_captured", d.llm_api_log.entries_captured)].join("\n"));
+
+  sections.push(
+    [
+      "## Events",
+      "Set difference of each event's <type>: <name> (e.g. \"tool call: exec\", \"skill used:",
+      "aiops-incident\") - timestamps and any duration/status/still-running detail are ignored,",
+      "so a repeat call to the same tool/model/skill (even with a different duration or outcome)",
+      "is not a change. Only whether something started or stopped being used at all shows up here.",
+      fmtSetLines("events", d.events),
+    ].join("\n"),
+  );
+
+  sections.push(["## Warnings", fmtSetLines("warnings", d.warnings)].join("\n"));
 
   return sections.join("\n\n");
 }

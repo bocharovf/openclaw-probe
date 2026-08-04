@@ -132,3 +132,87 @@ export type ProbeReport = {
 /** Thrown for user-facing validation failures (bad args, no data, etc). The message is
  * shown to the chat user as-is, so it must be self-contained and not leak internals. */
 export class ProbeUserError extends Error {}
+
+/** One numeric metric compared between two reports. `diff` is always `name2 - name1` (the
+ * second measurement minus the first) - never the other way round. Either side is `null`
+ * when the source report had `null` there (e.g. `context.system_prompt_chars_avg` with no
+ * samples), in which case `diff` is also `null` rather than a misleading number. */
+export type DiffNumeric = {
+  name1: number | null;
+  name2: number | null;
+  diff: number | null;
+};
+
+/** One "what was used/what happened" field compared between two reports as a set difference
+ * (name2 minus name1), not a numeric diff - counts are discarded, only presence/absence
+ * matters. `added` = present in name2 but not name1 (render with a `+` prefix), `removed` =
+ * present in name1 but not name2 (render with a `-` prefix). Both are sorted for determinism. */
+export type DiffSet = {
+  added: string[];
+  removed: string[];
+};
+
+/** Result of `/probe diff <name1>, <name2>`. Identifying/time metadata (names, generated_at,
+ * window start/end) is informational only, in `compared`, and is never diffed - see the
+ * field-level comments on `DiffNumeric`/`DiffSet` for how the two diff kinds behave. */
+export type ProbeDiffReport = {
+  diff: {
+    generated_at: string;
+    result_file: string;
+  };
+  compared: {
+    name1: { name: string; slug: string; mode: ProbeMode; generated_at: string; ts_start: string; ts_end: string };
+    name2: { name: string; slug: string; mode: ProbeMode; generated_at: string; ts_start: string; ts_end: string };
+  };
+  window: {
+    wall_clock_sec: DiffNumeric;
+  };
+  sessions: {
+    session_ids: DiffSet;
+    agents_used: DiffSet;
+  };
+  time: {
+    agent_active_sec: DiffNumeric;
+    llm_latency_sec: DiffNumeric;
+    tool_exec_sec: DiffNumeric;
+  };
+  iterations: {
+    agent_runs: DiffNumeric;
+    llm_calls: DiffNumeric;
+    tool_calling_rounds: DiffNumeric;
+    tool_calls_total: DiffNumeric;
+  };
+  models_used: DiffSet;
+  tokens: {
+    input: DiffNumeric;
+    output: DiffNumeric;
+    cacheRead: DiffNumeric;
+    cacheWrite: DiffNumeric;
+    reasoningTokens: DiffNumeric;
+    total: DiffNumeric;
+  };
+  context: {
+    system_prompt_chars_avg: DiffNumeric;
+  };
+  tools_used: DiffSet;
+  plugins_used: DiffSet;
+  skills_used: DiffSet;
+  errors: {
+    tool_call_errors: {
+      count: DiffNumeric;
+      by_tool: DiffSet;
+      by_status: DiffSet;
+      by_code: DiffSet;
+    };
+    agent_run_errors: {
+      count: DiffNumeric;
+      by_status: DiffSet;
+      by_code: DiffSet;
+    };
+  };
+  llm_api_log: {
+    entries_captured: DiffNumeric;
+  };
+  events: DiffSet;
+  warnings: DiffSet;
+};

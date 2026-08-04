@@ -146,13 +146,15 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   let llmCalls = 0;
   let toolRounds = 0;
   const contextCharsSamples: number[] = [];
-  const missingTrajectoryRuns: string[] = [];
+  const warnings: string[] = [];
   const modelsUsed: Record<string, number> = {};
 
   for (const rw of runWindows) {
     const mc = await findModelCompleted(paths.agentsDir, rw.agentId, rw.sessionId, rw.runId);
     if (!mc) {
-      missingTrajectoryRuns.push(rw.runId);
+      warnings.push(
+        `trajectory model.completed not found for run_id=${rw.runId} (rotated/deleted trajectory file, or run still in flight)`,
+      );
       continue;
     }
     const usage = ((mc.data as { usage?: Record<string, number> } | undefined)?.usage ?? {}) as Record<
@@ -167,11 +169,13 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     const snapshot = ((mc.data as { messagesSnapshot?: unknown[] } | undefined)?.messagesSnapshot ?? []) as Array<
       Record<string, unknown>
     >;
+    let matchedInWindow = 0;
     for (const m of snapshot) {
       if (m.role !== "assistant") continue;
       const ts = m.timestamp as number | undefined;
       if (ts === undefined || ts < rw.startedMs - 1000 || ts > rw.finishedMs + 1000) continue;
       llmCalls += 1;
+      matchedInWindow += 1;
       const content = (m.content as Array<Record<string, unknown>> | undefined) ?? [];
       const hadToolCall = content.some((c) => c?.type === "toolCall");
       if (hadToolCall) toolRounds += 1;
@@ -180,6 +184,31 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       const key = provider && model ? `${provider}/${model}` : runLevelModel;
       bump(modelsUsed, key ?? "unknown");
       timeline.push({ date: iso(ts), event: `LLM call: ${key ?? "unknown"}${hadToolCall ? " (with tool call)" : ""}` });
+    }
+
+    // Fallback for a real but unmatchable completion: `mc` proves a model.completed event
+    // exists for this run (its `usage` above is already counted), but none of its
+    // messagesSnapshot's assistant-message timestamps fell inside the run's window. Observed
+    // live on a long multi-turn session: messagesSnapshot was stale/reused verbatim (same
+    // message content and timestamps) across several unrelated runIds finishing minutes apart,
+    // with compactionCount 0 - not ordinary compaction truncation, apparently a host-side
+    // trajectory-writer quirk on that build. Rather than silently reporting 0 llm_calls / an
+    // empty models_used while tokens still show real numbers for the same event (the exact
+    // contradiction this fallback exists to avoid), count one LLM call from the event's own
+    // top-level provider/modelId/ts, which do not depend on the snapshot at all. This cannot
+    // determine whether that call produced a tool call, so tool_calling_rounds is left
+    // unincremented for it and a warning notes the gap.
+    if (matchedInWindow === 0) {
+      llmCalls += 1;
+      bump(modelsUsed, runLevelModel ?? "unknown");
+      const ts = typeof mc.ts === "string" ? mc.ts : iso(rw.finishedMs);
+      timeline.push({
+        date: ts,
+        event: `LLM call: ${runLevelModel ?? "unknown"} (tool-call status unknown - trajectory snapshot timestamps were outside the run window)`,
+      });
+      warnings.push(
+        `trajectory messagesSnapshot for run_id=${rw.runId} had no assistant-message timestamp inside the run window; counted 1 LLM call from the model.completed event's own provider/model instead of the snapshot, but could not determine whether it produced a tool call`,
+      );
     }
 
     const cc = await findContextCompiledNear(paths.agentsDir, rw.agentId, rw.sessionId, rw.runId);
@@ -208,10 +237,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   // ---- raw LLM request/response archive ----
   const rawEntries = await collectRawLlmEntries(paths.llmLogDir, tsStartMs, tsEndMs);
   const rawFile = await writeRawLlmEntriesFile(rawRequestsPath(paths, slug), rawEntries);
-
-  const warnings = missingTrajectoryRuns.map(
-    (r) => `trajectory model.completed not found for run_id=${r} (rotated/deleted trajectory file, or run still in flight)`,
-  );
 
   const report: ProbeReport = {
     probe: { name, mode, generated_at: iso(Date.now()) },

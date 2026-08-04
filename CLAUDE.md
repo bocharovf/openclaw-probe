@@ -128,6 +128,65 @@ before/after pending-state pattern.
 why `skills_used` needs no operator opt-in while `llm_api_log` does. Don't
 conflate the two when explaining either in the README.
 
+**`/probe diff <name1>, <name2>` requires a literal comma between the two
+names, not whitespace.** Both names can themselves contain spaces (including
+the auto-generated range name `"<start> .. <end>"`, which already has spaces
+baked in), so splitting on whitespace like the single-name commands do would
+be ambiguous — there's no way to tell where name1 ends and name2 begins. The
+comma is the delimiter of last resort here; don't "simplify" the parser to
+whitespace-splitting, it will misparse any name with a space in it.
+
+**A matched `model.completed` trajectory event's `messagesSnapshot` can have stale/reused
+per-message timestamps that don't fall inside the run's own audit-derived window - don't
+gate `llm_calls`/`models_used` entirely on that filter passing.** Found live on a real,
+non-toy session (`d6d5a20c-...`, name `createdeletehostwithskill1`): the report showed real
+non-zero `tokens` (from `mc.data.usage`, summed unconditionally once per matched run) but
+`llm_calls: 0` and `models_used: {}` for the same run - a real user-reported contradiction,
+not user error. Root cause: `llm_calls`/`models_used`/the `"LLM call:"` timeline entries were
+derived *only* by filtering `mc.data.messagesSnapshot` for assistant messages whose
+`m.timestamp` fell inside `[rw.startedMs - 1000, rw.finishedMs + 1000]` - and on that session,
+every `model.completed` event's snapshot (checked directly in the raw `.trajectory.jsonl`)
+carried the exact same stale message content and timestamp (~20 minutes before the run it was
+attached to), across several unrelated `runId`s. `compactionCount` was `0`, so this isn't
+ordinary compaction truncation - looks like a host-side trajectory-writer quirk on that build,
+not something probe caused or can prevent. The event's own top-level `provider`/`modelId`/`ts`
+fields were fine throughout (used already for `runLevelModel`, and for `tokens` via
+`mc.data.usage` - neither depends on the snapshot). Fix (in `src/report.ts`'s `buildReport`):
+if zero snapshot messages match the run's window (`matchedInWindow === 0`) after the normal
+loop, still count one `llm_calls` and one `modelsUsed` bump from `runLevelModel`/`mc.ts`
+directly - since a matched `model.completed` event for this `runId` is itself proof a
+completion happened, independent of whatever's wrong with its snapshot. This can't recover
+`tool_calling_rounds` for that call (no reliable non-snapshot signal for "had a tool call"),
+so it's deliberately left uncounted for the fallback path, with a `warnings` entry saying so -
+don't try to guess it from `tools_used`/audit data, that would silently misattribute unrelated
+tool calls from other LLM calls in the same run. Regression test:
+`report.test.ts`'s "falls back to the model.completed event's own provider/model...".
+
+**`events` in `src/diff.ts`'s `buildDiff` is set-diffed by each entry's
+normalized `"<type>: <name>"` key (`normalizeEventKey`), not its raw `event`
+text, and `date` is discarded before comparing.** Two separate measurement
+windows always have different timestamps for otherwise-identical events, so
+including `date` in the comparison key would make every single event look
+"added" on one side and "removed" on the other — the diff would be 100%
+noise. The same problem exists one level down: `report.ts` bakes
+duration/status/still-running detail into the tail of `event` (e.g.
+`"tool call: exec (0.16s)"` vs `"(failed: tool_failed, 0.41s)"` vs
+`"(started, still running at window end)"`) — diffing the raw string made
+two calls to the *same* tool with different durations look like a
+tool-added-and-removed pair, which is exactly what a user flagged live
+(`/probe diff` on two runs that both called `exec` repeatedly showed it as
+both `+`/`-`). `normalizeEventKey` fixes this by cutting at the first
+`" ("`, since every event format in `report.ts` puts that detail in a
+trailing `" (...)"` block and nothing else uses `" ("` — if you add a new
+timeline event kind in `report.ts`, keep that convention (detail goes in a
+trailing parenthesized block) or `normalizeEventKey` will silently stop
+stripping it correctly. This also means a report with the same tool/
+skill/model called multiple times (with different outcomes/durations)
+collapses to one set entry, same as before; that's intentional — the diff
+answers "did X start/stop being used at all," not "how many times," which
+is also why `events`/`tools_used`/etc have no per-item count in the diff
+output in the first place.
+
 ## Dev workflow
 
 ```bash

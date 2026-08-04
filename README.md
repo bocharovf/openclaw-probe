@@ -7,7 +7,8 @@ usage, error counts, and (optionally) a full raw LLM request/response archive.
 It exists to answer one question repeatedly and consistently: *did this change (a new
 skill, a prompt tweak, a different model, a new tool plugin) make the agent cheaper,
 faster, or more/less reliable?* Run the same task with `/probe start` / `/probe stop`
-bracketing it, make your change, run it again, and diff the two JSON reports.
+bracketing it, make your change, run it again, and compare the two reports with
+`/probe diff <name1>, <name2>` (see [Diffing two measurements](#diffing-two-measurements)).
 
 Probe is self-contained: it captures its own LLM request/response data and detects its own
 skill usage via hooks, and does **not** depend on the `llm-api-logger` or `skill-usage`
@@ -54,6 +55,16 @@ diagnose instead of looking like a bug.
 | `audit.enabled` is not `false` (default `true`) | `time`, `iterations`, `errors`, `sessions`, and `tools_used` all come from the audit ledger - there is no other source for them. | Every report has zeroed-out `time`/`iterations`/`errors`, empty `sessions`/`tools_used`, and `/probe <start> <end>` for that window fails with the "No data found" error (see [Error messages](#error-messages)). `/probe start`/`stop` still "succeeds" but the report is empty. |
 | The probed window is inside the audit ledger's retention (**30 days / 100,000 rows**, not configurable) | Older records are pruned; there's nothing to read. | Same "No data found" error for `/probe <start> <end>` on an old range. Always use `/probe start`/`stop` for anything you want reliably measured, and treat `/probe <start> <end>` as best-effort for anything more than a few days old. |
 | Trajectory sidecar files for the involved runs still exist on disk (written automatically, no on/off switch - but `session.maintenance` can prune old ones as part of its retention/disk-budget cleanup) | `tokens`, `models_used`, `context`, and `llm_calls`/`tool_calling_rounds` come from each run's `<agent>/sessions/<session>.trajectory.jsonl`. | Those fields undercount or stay at `0` for the affected runs, and the report's `warnings` array names the run id it couldn't find a trajectory for. `time`/`iterations`/`errors`/`tools_used` are unaffected (audit-ledger-only). |
+
+`llm_calls`/`models_used` normally come from a run's `model.completed` trajectory event's
+`messagesSnapshot`, matched to the run by timestamp. If that snapshot's timestamps don't fall
+inside the run's window (observed on one host as stale/reused snapshot data across unrelated
+runs - a trajectory-writer quirk, not something probe controls), probe falls back to counting
+one LLM call from that event's own `provider`/`modelId` fields instead of leaving `llm_calls`
+at `0` while `tokens` still shows real data for the same run - the exact contradiction that
+would otherwise look like a bug. The one thing this fallback can't recover is whether that
+particular call produced a tool call, so `tool_calling_rounds` stays uncounted for it; the
+report's `warnings` array names the affected `run_id` when this happens.
 
 `skills_used` needs no separate config at all - it's a core metric like the rest of this
 table, not gated behind an operator opt-in or another plugin. Probe detects skill use itself
@@ -112,16 +123,19 @@ matching note in the report's `warnings` array.
 | `/probe verbose <name>` | Print a saved measurement's report as an annotated, human-readable text report explaining every field. |
 | `/probe list` | List the last 50 saved measurements, newest first, with their name, generation timestamp, and mode. |
 | `/probe delete <name>` | Delete a saved measurement (its report and raw-request archive, if any). Fails if the name doesn't exist. |
+| `/probe diff <name1>, <name2>` | Compare two saved measurements field by field, save the result, and print it as JSON. See [Diffing two measurements](#diffing-two-measurements). |
+| `/probe diff verbose <name1>, <name2>` | Same comparison, printed as an annotated, human-readable text report instead of JSON. |
 | `/probe` (no args) | Print this command summary. |
 
 Only **one** `start`ed measurement can be active at a time - `/probe start` while one is
 already running is rejected, and you must `/probe stop` (or let it finish) before starting
 another.
 
-A probe name cannot be exactly `start`, `stop`, `verbose`, `list`, or `delete` (reserved
-words), and cannot be two ISO 8601 timestamps separated by whitespace (that parses as a range
-request instead). Names may contain spaces, e.g. `/probe start baseline before cache change`.
-The same rules apply to the optional trailing name on `/probe <start> <end> [name]`.
+A probe name cannot be exactly `start`, `stop`, `verbose`, `list`, `delete`, or `diff`
+(reserved words), and cannot be two ISO 8601 timestamps separated by whitespace (that parses
+as a range request instead). Names may contain spaces, e.g.
+`/probe start baseline before cache change`. The same rules apply to the optional trailing
+name on `/probe <start> <end> [name]`.
 
 Naming a range measurement is recommended - the auto-generated `"<start> .. <end>"` name
 works but is unwieldy to type back exactly (it must match character-for-character, aside
@@ -142,6 +156,9 @@ from case) when you later want `/probe <name>` or `/probe verbose <name>`.
 
 /probe list
 /probe delete baseline
+
+/probe diff baseline, incident-postmortem
+/probe diff verbose baseline, incident-postmortem
 ```
 
 ### Error messages
@@ -151,11 +168,112 @@ silent wrong answer:
 
 - Starting a measurement while one is already active.
 - Stopping when no measurement is active.
-- Showing (JSON or verbose) or deleting a measurement name that does not exist.
+- Showing (JSON or verbose), deleting, or diffing a measurement name that does not exist.
+- Diffing a measurement whose saved file is corrupt (not valid JSON) or missing fields a
+  report must have (hand-edited, or from an incompatible probe version).
 - A time range where the start is not strictly before the end.
 - A time range whose source data is unavailable - nothing in OpenClaw's audit ledger falls
   inside the window (wrong range, a typo, or the window is older than the ledger's 30-day /
   100,000-row retention - see [Data sources](#data-sources)).
+
+## Diffing two measurements
+
+`/probe diff <name1>, <name2>` (note the comma - both names may themselves contain spaces, so
+the comma is what separates them) compares two saved reports and answers "what changed
+between these two runs?" without you having to eyeball two JSON blobs by hand.
+
+- **Numeric fields** (`window.wall_clock_sec`, everything under `time`/`iterations`/`tokens`,
+  `context.system_prompt_chars_avg`, error `count`s, `llm_api_log.entries_captured`): the
+  reported value is **`name2 - name1`** - positive means it grew from name1 to name2,
+  negative means it shrank. Either side is `null` (and so is the diff) if the source report
+  had `null` there.
+- **List/"what was used or happened" fields** (`sessions.session_ids`, `sessions.agents_used`,
+  `models_used`, `tools_used`, `plugins_used`, `skills_used`, the `errors.*.by_tool`/
+  `by_status`/`by_code` breakdowns, `events`, `warnings`): compared as a **set difference
+  name2 − name1**, discarding counts - only presence/absence matters. A value present in
+  name2 but not name1 is prefixed `+` (added); present in name1 but not name2 is prefixed `-`
+  (removed); present in both is omitted entirely. For example, if `skillA` was used in name2
+  but not name1, the diff shows `+skillA`; the reverse shows `-skillA`. `events` is diffed by
+  each entry's **`<type>: <name>`** (e.g. `"tool call: exec"`, `"skill used: aiops-incident"`),
+  not its full text - timestamps and any duration/status/still-running detail (`"(0.16s)"`,
+  `"(failed: tool_failed, 0.41s)"`, `"(started, still running at window end)"`,
+  `"(with tool call)"`) are stripped before comparing, so a repeat call to the same
+  tool/model/skill - even with a different duration or outcome - is not treated as a change.
+  A tool called 5 times in name1 and once in name2 shows no change at all here, since this
+  only tracks presence, not count (see `tools_used` above for counts).
+- **Identifying/time fields are never diffed**: `probe.name`, `probe.mode`,
+  `probe.generated_at`, `window.ts_start`, `window.ts_end`. They appear only in the diff
+  report's `compared` header, for context.
+
+The result is saved next to the two measurements it compares, named
+**`<slug1>.<slug2>.diff.json`** (slugified names, same rule as measurement result files), and
+also printed - as JSON for `/probe diff`, as an annotated text report for
+`/probe diff verbose`. Diff files don't count as measurements: `/probe list` does not show
+them, and `/probe delete` does not target them (delete them directly if you no longer need
+them - or just re-run the same diff command to overwrite it).
+
+### Diff report shape
+
+See [`ProbeDiffReport`](src/types.ts) for the TypeScript shape (`DiffNumeric` = `{ name1,
+name2, diff }`, `DiffSet` = `{ added, removed }`).
+
+```jsonc
+{
+  "diff": {
+    "generated_at": "2026-08-04T09:12:03.501Z",
+    "result_file": "/root/.openclaw/state/plugins/probe/results/baseline.incident-postmortem.diff.json"
+  },
+  "compared": {
+    "name1": { "name": "baseline", "slug": "baseline", "mode": "start-stop", "generated_at": "...", "ts_start": "...", "ts_end": "..." },
+    "name2": { "name": "incident-postmortem", "slug": "incident-postmortem", "mode": "range", "generated_at": "...", "ts_start": "...", "ts_end": "..." }
+  },
+  "window": { "wall_clock_sec": { "name1": 221.21, "name2": 340.0, "diff": 118.79 } },
+  "sessions": {
+    "session_ids": { "added": ["agent:main:incident"], "removed": [] },
+    "agents_used": { "added": [], "removed": [] }
+  },
+  "time": {
+    "agent_active_sec": { "name1": 41.7, "name2": 60.2, "diff": 18.5 },
+    "llm_latency_sec": { "name1": 33.2, "name2": 40.0, "diff": 6.8 },
+    "tool_exec_sec": { "name1": 8.5, "name2": 20.2, "diff": 11.7 }
+  },
+  "iterations": {
+    "agent_runs": { "name1": 3, "name2": 4, "diff": 1 },
+    "llm_calls": { "name1": 7, "name2": 9, "diff": 2 },
+    "tool_calling_rounds": { "name1": 4, "name2": 5, "diff": 1 },
+    "tool_calls_total": { "name1": 6, "name2": 9, "diff": 3 }
+  },
+  "models_used": { "added": [], "removed": [] },
+  "tokens": {
+    "input": { "name1": 18422, "name2": 20100, "diff": 1678 },
+    "output": { "name1": 1310, "name2": 1500, "diff": 190 },
+    "cacheRead": { "name1": 15900, "name2": 15900, "diff": 0 },
+    "cacheWrite": { "name1": 2100, "name2": 2100, "diff": 0 },
+    "reasoningTokens": { "name1": 0, "name2": 0, "diff": 0 },
+    "total": { "name1": 19732, "name2": 21600, "diff": 1868 }
+  },
+  "context": { "system_prompt_chars_avg": { "name1": 48267, "name2": 48900, "diff": 633 } },
+  "tools_used": { "added": ["postgres_query_write"], "removed": [] },
+  "plugins_used": { "added": ["postgres-ops"], "removed": [] },
+  "skills_used": { "added": ["aiops-incident"], "removed": [] },
+  "errors": {
+    "tool_call_errors": {
+      "count": { "name1": 1, "name2": 0, "diff": -1 },
+      "by_tool": { "added": [], "removed": ["postgres_query"] },
+      "by_status": { "added": [], "removed": ["failed"] },
+      "by_code": { "added": [], "removed": ["connection_refused"] }
+    },
+    "agent_run_errors": {
+      "count": { "name1": 0, "name2": 0, "diff": 0 },
+      "by_status": { "added": [], "removed": [] },
+      "by_code": { "added": [], "removed": [] }
+    }
+  },
+  "llm_api_log": { "entries_captured": { "name1": 7, "name2": 9, "diff": 2 } },
+  "events": { "added": ["skill used: aiops-incident"], "removed": ["tool call: postgres_query"] },
+  "warnings": { "added": [], "removed": [] }
+}
+```
 
 ## The report
 
@@ -384,8 +502,9 @@ npm run plugin:install   # build + `openclaw plugins install . --force`
 Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts`
 (trajectory-file readers), `src/llmCapture.ts` (hook-based raw LLM log capture),
 `src/skillUsage.ts` (hook-based skill-use detection and its own log capture/collection),
-`src/report.ts` (aggregation), `src/commands.ts` (`/probe` argument parsing and dispatch),
-`src/format.ts` (verbose report rendering), `src/index.ts` (plugin registration).
+`src/report.ts` (aggregation), `src/diff.ts` (comparing two reports into a `ProbeDiffReport`),
+`src/commands.ts` (`/probe` argument parsing and dispatch), `src/format.ts` (verbose
+report/diff rendering), `src/index.ts` (plugin registration).
 
 ## License
 

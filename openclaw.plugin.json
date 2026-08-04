@@ -2,8 +2,7 @@
   "id": "probe",
   "name": "Probe",
   "description": "Measures agent run cost, speed, and behavior over a time window (tokens, time breakdown, tool/skill usage, errors, raw LLM request/response archive) via /probe chat commands, for before/after experiments on agent changes.",
-  "version": "0.1.0",
-  "hooks": ["llm_input", "llm_output"],
+  "version": "0.2.0",
   "uiHints": {
     "openclawBin": {
       "label": "OpenClaw CLI binary",

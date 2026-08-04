@@ -250,6 +250,51 @@ describe("buildReport", () => {
       ]);
     });
 
+    it("falls back to the model.completed event's own provider/model when messagesSnapshot has no timestamp inside the run window (regression: llm_calls=0/models_used={} despite real tokens)", async () => {
+      // Reproduces a real trajectory observed live: the matched model.completed event's usage
+      // is real (correctly summed into tokens), but its messagesSnapshot was stale - every
+      // assistant-message timestamp fell well before the run's actual window (a host-side
+      // trajectory-writer quirk, not compaction - compactionCount was 0). Before this fix,
+      // that meant tokens showed real numbers while llm_calls stayed 0 and models_used was
+      // empty for the same run, which is exactly the contradiction a user flagged.
+      mockedFetchAuditEvents.mockResolvedValue([
+        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 100000 }),
+        ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 200000, status: "succeeded" }),
+      ]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+      mockedFindModelCompleted.mockResolvedValueOnce({
+        provider: "deepseek",
+        modelId: "deepseek-v4-pro",
+        ts: new Date(200000).toISOString(),
+        data: {
+          usage: { input: 100, output: 20, total: 120 },
+          // stale: every assistant timestamp is way before the run's [100000, 200000] window
+          messagesSnapshot: [
+            { role: "assistant", timestamp: 500, provider: "deepseek", model: "deepseek-v4-pro", content: [{ type: "text" }] },
+          ],
+        },
+      } as any);
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "events-stale-snapshot",
+        slug: "events-stale-snapshot",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 300000,
+      });
+
+      expect(report.tokens.total).toBe(120); // unaffected either way - not the bug
+      expect(report.iterations.llm_calls).toBe(1); // was 0 before the fix
+      expect(report.models_used).toEqual({ "deepseek/deepseek-v4-pro": 1 }); // was {} before the fix
+      expect(report.iterations.tool_calling_rounds).toBe(0); // can't be known for the fallback call
+      const llmEvent = report.events.find((e) => e.event.startsWith("LLM call:"));
+      expect(llmEvent?.date).toBe(new Date(200000).toISOString());
+      expect(llmEvent?.event).toContain("deepseek/deepseek-v4-pro");
+      expect(report.warnings.some((w) => w.includes("run_id=run-stale") && w.includes("no assistant-message timestamp"))).toBe(true);
+    });
+
     it("records one entry per skill use", async () => {
       mockedFetchAuditEvents.mockResolvedValue([
         ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1000 }),

@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProbePaths } from "./paths.js";
-import type { ProbeMode, ProbeReport } from "./types.js";
+import type { ProbeDiffReport, ProbeMode, ProbeReport } from "./types.js";
 
 export type ActiveMarker = {
   name: string;
@@ -65,6 +65,25 @@ export async function deleteResult(paths: ProbePaths, slug: string): Promise<boo
   return true;
 }
 
+/** Path of a saved diff report between two measurements, named `<slug1>.<slug2>.diff.json`
+ * (slugified, not the raw names, so it stays filesystem-safe) in the same directory as the
+ * measurements it compares. */
+export function diffResultPath(paths: ProbePaths, slug1: string, slug2: string): string {
+  return join(paths.probeResultsDir, `${slug1}.${slug2}.diff.json`);
+}
+
+export async function writeDiffResult(
+  paths: ProbePaths,
+  slug1: string,
+  slug2: string,
+  diff: ProbeDiffReport,
+): Promise<string> {
+  await mkdir(paths.probeResultsDir, { recursive: true });
+  const path = diffResultPath(paths, slug1, slug2);
+  await writeFile(path, JSON.stringify(diff, null, 2), "utf-8");
+  return path;
+}
+
 export type ResultSummary = {
   name: string;
   slug: string;
@@ -75,8 +94,8 @@ export type ResultSummary = {
 /** Lists saved measurements, newest first (by `probe.generated_at`), capped at `limit`.
  * `total` is the count of all readable saved reports, so callers can tell "showing 50 of 50"
  * apart from "showing 50 of 214". Corrupt/unreadable result files are skipped rather than
- * failing the whole listing - `.rawrequests.jsonl` sidecars are excluded by the `.json`
- * extension filter, not by any name-based guess. */
+ * failing the whole listing - `.rawrequests.jsonl` sidecars and `.diff.json` comparison
+ * reports (see `diffResultPath`) are excluded explicitly, not by any incidental parse failure. */
 export async function listResults(paths: ProbePaths, limit: number): Promise<{ summaries: ResultSummary[]; total: number }> {
   let files: string[];
   try {
@@ -88,7 +107,7 @@ export async function listResults(paths: ProbePaths, limit: number): Promise<{ s
 
   const all: ResultSummary[] = [];
   for (const file of files) {
-    if (!file.endsWith(".json")) continue;
+    if (!file.endsWith(".json") || file.endsWith(".diff.json")) continue;
     try {
       const text = await readFile(join(paths.probeResultsDir, file), "utf-8");
       const report = JSON.parse(text) as ProbeReport;
