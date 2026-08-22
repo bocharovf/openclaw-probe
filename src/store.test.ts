@@ -33,6 +33,11 @@ function report(name: string, mode: ProbeReport["probe"]["mode"], generatedAt: s
       agent_run_errors: { count: 0, by_status: {}, by_code: {} },
     },
     llm_api_log: { entries_captured: 0, file: null },
+    memory_search: {
+      active_memory: { calls: 0, hits_total: 0, chars_found: 0 },
+      explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+      file: null,
+    },
     events: [],
     warnings: [],
   };
@@ -136,6 +141,10 @@ function diffReport(): ProbeDiffReport {
       agent_run_errors: { count: numeric, by_status: set, by_code: set },
     },
     llm_api_log: { entries_captured: numeric },
+    memory_search: {
+      active_memory: { calls: numeric, hits_total: numeric, chars_found: numeric },
+      explicit: { calls: numeric, hits_total: numeric, chars_found: numeric },
+    },
     events: set,
     warnings: set,
   };

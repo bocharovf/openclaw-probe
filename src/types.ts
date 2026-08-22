@@ -45,6 +45,7 @@ export type AuditEvent = {
   errorCode?: string;
   agentId?: string;
   sessionId?: string;
+  sessionKey?: string;
   runId?: string;
   toolCallId?: string;
   toolName?: string;
@@ -55,12 +56,28 @@ export type AuditEvent = {
 export type RunWindow = {
   agentId: string;
   sessionId: string;
+  /** Present when the pairing audit events carried one. Used to recognize the Active Memory
+   * plugin's own blocking-recall sub-agent runs (`sessionKey` contains `:active-memory:`,
+   * `sessionId` starts with `active-memory-`) - see `isActiveMemoryRunWindow` in report.ts. */
+  sessionKey?: string;
   runId: string;
   startedMs: number;
   finishedMs: number;
 };
 
 export type SkillUsageEntry = { name: string; uses: number };
+
+/** Which of the two memory-search paths a `memory_search`/`memory_get` call came from -
+ * see `memorySearchUsage.ts` for how this is told apart (the Active Memory plugin's own
+ * blocking-recall sub-agent runs with a distinct sessionKey/sessionId; everything else is a
+ * normal tool call inside the agent's own session). */
+export type MemorySearchSource = "active_memory" | "explicit";
+
+export type MemorySearchStats = {
+  calls: number;
+  hits_total: number;
+  chars_found: number;
+};
 
 /** One line of the report's chronological `events` timeline - ISO timestamp plus a short,
  * human-readable description. Built from the same underlying sources as the rest of the
@@ -123,6 +140,11 @@ export type ProbeReport = {
   };
   llm_api_log: {
     entries_captured: number;
+    file: string | null;
+  };
+  memory_search: {
+    active_memory: MemorySearchStats;
+    explicit: MemorySearchStats;
     file: string | null;
   };
   events: ProbeEvent[];
@@ -212,6 +234,10 @@ export type ProbeDiffReport = {
   };
   llm_api_log: {
     entries_captured: DiffNumeric;
+  };
+  memory_search: {
+    active_memory: { calls: DiffNumeric; hits_total: DiffNumeric; chars_found: DiffNumeric };
+    explicit: { calls: DiffNumeric; hits_total: DiffNumeric; chars_found: DiffNumeric };
   };
   events: DiffSet;
   warnings: DiffSet;

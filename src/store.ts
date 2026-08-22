@@ -37,6 +37,10 @@ export function rawRequestsPath(paths: ProbePaths, slug: string): string {
   return join(paths.probeResultsDir, `${slug}.rawrequests.jsonl`);
 }
 
+export function memorySearchResultsPath(paths: ProbePaths, slug: string): string {
+  return join(paths.probeResultsDir, `${slug}.memory-search.jsonl`);
+}
+
 export async function readResult(paths: ProbePaths, slug: string): Promise<ProbeReport | null> {
   try {
     const text = await readFile(resultPath(paths, slug), "utf-8");
@@ -54,14 +58,16 @@ export async function writeResult(paths: ProbePaths, slug: string, report: Probe
   return path;
 }
 
-/** Deletes a saved measurement's report and its raw-requests sidecar (if any). Returns false
- * without deleting anything if no report exists under that slug - callers use this to decide
- * whether to show a "not found" error, so a missing sidecar alone must not count as absent. */
+/** Deletes a saved measurement's report and its raw-requests/memory-search sidecars (if any).
+ * Returns false without deleting anything if no report exists under that slug - callers use
+ * this to decide whether to show a "not found" error, so a missing sidecar alone must not
+ * count as absent. */
 export async function deleteResult(paths: ProbePaths, slug: string): Promise<boolean> {
   const existed = (await readResult(paths, slug)) !== null;
   if (!existed) return false;
   await rm(resultPath(paths, slug), { force: true });
   await rm(rawRequestsPath(paths, slug), { force: true });
+  await rm(memorySearchResultsPath(paths, slug), { force: true });
   return true;
 }
 

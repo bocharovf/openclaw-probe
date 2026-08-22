@@ -154,8 +154,19 @@ export function formatVerboseReport(r: ProbeReport): string {
 
   sections.push(
     [
+      "## Memory search",
+      `active_memory: ${r.memory_search.active_memory.calls} call(s), ${r.memory_search.active_memory.hits_total} hit(s) total, ${r.memory_search.active_memory.chars_found} chars found - the Active Memory plugin's own blocking-recall sub-agent (runs automatically before a reply, if enabled).`,
+      `explicit: ${r.memory_search.explicit.calls} call(s), ${r.memory_search.explicit.hits_total} hit(s) total, ${r.memory_search.explicit.chars_found} chars found - memory_search/memory_get called directly inside the agent's own session (e.g. following AGENTS.md guidance).`,
+      `file: ${r.memory_search.file ?? "none (no memory_search/memory_get calls in this window - expected if Active Memory isn't enabled and nothing explicitly searched memory)"}`,
+      "All-zero for both is normal, not an error, when memory search isn't configured on the host at all.",
+      "Source: probe's own after_tool_call hook capture, watching memory_search/memory_get and classifying each call by its sessionKey/sessionId (see README).",
+    ].join("\n"),
+  );
+
+  sections.push(
+    [
       "## Events",
-      `Chronological log of everything else in this report, one line per agent run / tool call / LLM call / skill use (${r.events.length} entries).`,
+      `Chronological log of everything else in this report, one line per agent run / tool call / LLM call / skill use / memory search (${r.events.length} entries).`,
       r.events.length ? r.events.map((e) => `  ${e.date}  ${e.event}`).join("\n") : "  none",
       "Source: the same audit-ledger, trajectory, and skill-usage data as the sections above, merged into one timeline and sorted by timestamp.",
     ].join("\n"),
@@ -275,6 +286,20 @@ export function formatVerboseDiff(d: ProbeDiffReport): string {
   );
 
   sections.push(["## Raw LLM request/response log", fmtNumericLine("entries_captured", d.llm_api_log.entries_captured)].join("\n"));
+
+  sections.push(
+    [
+      "## Memory search",
+      "active_memory:",
+      fmtNumericLine("  calls", d.memory_search.active_memory.calls),
+      fmtNumericLine("  hits_total", d.memory_search.active_memory.hits_total),
+      fmtNumericLine("  chars_found", d.memory_search.active_memory.chars_found),
+      "explicit:",
+      fmtNumericLine("  calls", d.memory_search.explicit.calls),
+      fmtNumericLine("  hits_total", d.memory_search.explicit.hits_total),
+      fmtNumericLine("  chars_found", d.memory_search.explicit.chars_found),
+    ].join("\n"),
+  );
 
   sections.push(
     [

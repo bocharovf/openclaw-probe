@@ -17,6 +17,7 @@
 import { definePluginEntry, type OpenClawPluginDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { runProbeCommand } from "./commands.js";
 import { registerLlmCapture } from "./llmCapture.js";
+import { registerMemorySearchCapture } from "./memorySearchUsage.js";
 import { resolveBaseDir, resolvePaths } from "./paths.js";
 import { registerSkillCapture } from "./skillUsage.js";
 import { DEFAULT_CONFIG, ProbeUserError, type ProbeConfig } from "./types.js";
@@ -49,6 +50,7 @@ const entry: OpenClawPluginDefinition = definePluginEntry({
 
     registerLlmCapture(api, config, paths.llmLogDir, api.logger);
     registerSkillCapture(api, paths.skillLogDir, api.logger);
+    registerMemorySearchCapture(api, paths.memorySearchLogDir, api.logger);
 
     api.registerCommand({
       name: "probe",

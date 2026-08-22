@@ -33,6 +33,11 @@ function emptyReport(overrides: Partial<Awaited<ReturnType<typeof buildReport>>[
       agent_run_errors: { count: 0, by_status: {}, by_code: {} },
     },
     llm_api_log: { entries_captured: 0, file: null },
+    memory_search: {
+      active_memory: { calls: 0, hits_total: 0, chars_found: 0 },
+      explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+      file: null,
+    },
     events: [],
     warnings: [],
     ...overrides,
@@ -388,6 +393,16 @@ describe("runProbeCommand", () => {
       );
 
       await expect(runProbeCommand("diff incomplete, good", deps)).rejects.toThrow(/missing the expected field/);
+    });
+
+    it("rejects diffing against a report saved before the memory_search field existed (older probe version)", async () => {
+      await saveMeasurement("current");
+      const oldShape = emptyReport();
+      delete (oldShape as Partial<typeof oldShape>).memory_search;
+      await mkdir(deps.paths.probeResultsDir, { recursive: true });
+      await writeFile(join(deps.paths.probeResultsDir, "old.json"), JSON.stringify(oldShape));
+
+      await expect(runProbeCommand("diff old, current", deps)).rejects.toThrow(/missing the expected field "memory_search"/);
     });
 
     it("computes and saves a diff, printed as JSON", async () => {

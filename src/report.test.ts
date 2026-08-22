@@ -19,16 +19,23 @@ vi.mock("./llmCapture.js", () => ({
   collectRawLlmEntries: vi.fn().mockResolvedValue([]),
   writeRawLlmEntriesFile: vi.fn().mockResolvedValue(null),
 }));
+vi.mock("./memorySearchUsage.js", () => ({
+  collectMemorySearchEvents: vi.fn().mockResolvedValue([]),
+  writeMemorySearchEntriesFile: vi.fn().mockResolvedValue(null),
+  registerMemorySearchCapture: vi.fn(),
+}));
 
 import { fetchAuditEvents, fetchToolToPluginMap } from "./cli.js";
 import { buildReport } from "./report.js";
 import { findModelCompleted } from "./trajectory.js";
 import { collectSkillUsageEvents } from "./skillUsage.js";
+import { collectMemorySearchEvents } from "./memorySearchUsage.js";
 
 const mockedFetchAuditEvents = vi.mocked(fetchAuditEvents);
 const mockedFetchToolToPluginMap = vi.mocked(fetchToolToPluginMap);
 const mockedFindModelCompleted = vi.mocked(findModelCompleted);
 const mockedCollectSkillUsageEvents = vi.mocked(collectSkillUsageEvents);
+const mockedCollectMemorySearchEvents = vi.mocked(collectMemorySearchEvents);
 
 function ev(partial: Partial<AuditEvent>): AuditEvent {
   return { kind: "agent_run", action: "", status: "succeeded", occurredAt: 0, ...partial } as AuditEvent;
@@ -156,6 +163,159 @@ describe("buildReport", () => {
     });
 
     expect(report.plugins_used).toEqual(["core"]);
+  });
+
+  describe("Active Memory run windows", () => {
+    it("warns about a missing trajectory for a normal run (baseline, unaffected by the active-memory carve-out)", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([
+        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-normal", sessionId: "s1", sessionKey: "agent:main:main", agentId: "main", occurredAt: 0 }),
+        ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-normal", sessionId: "s1", sessionKey: "agent:main:main", agentId: "main", occurredAt: 100, status: "succeeded" }),
+      ]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "normal-missing-trajectory",
+        slug: "normal-missing-trajectory",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      expect(report.warnings.some((w) => w.includes("run_id=run-normal"))).toBe(true);
+    });
+
+    it("does not warn about a missing trajectory for an Active Memory sub-agent run, identified by sessionKey", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([
+        ev({
+          kind: "agent_run",
+          action: "agent.run.started",
+          runId: "active-memory-abc123",
+          sessionId: "active-memory-abc123",
+          sessionKey: "agent:main:telegram:direct:868326324:active-memory:845bf794172a",
+          agentId: "main",
+          occurredAt: 0,
+        }),
+        ev({
+          kind: "agent_run",
+          action: "agent.run.finished",
+          runId: "active-memory-abc123",
+          sessionId: "active-memory-abc123",
+          sessionKey: "agent:main:telegram:direct:868326324:active-memory:845bf794172a",
+          agentId: "main",
+          occurredAt: 100,
+          status: "failed",
+        }),
+      ]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "active-memory-missing-trajectory",
+        slug: "active-memory-missing-trajectory",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      expect(report.warnings).toEqual([]);
+      // The run still counts everywhere else - only the warning is suppressed.
+      expect(report.iterations.agent_runs).toBe(1);
+      expect(report.sessions.agents_used).toEqual({ main: 1 });
+    });
+
+    it("does not warn when only sessionId (not sessionKey) carries the active-memory marker", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([
+        ev({ kind: "agent_run", action: "agent.run.started", runId: "r1", sessionId: "active-memory-xyz", agentId: "main", occurredAt: 0 }),
+        ev({ kind: "agent_run", action: "agent.run.finished", runId: "r1", sessionId: "active-memory-xyz", agentId: "main", occurredAt: 100, status: "succeeded" }),
+      ]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "active-memory-sessionid-only",
+        slug: "active-memory-sessionid-only",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      expect(report.warnings).toEqual([]);
+    });
+  });
+
+  describe("memory_search aggregation", () => {
+    it("reports all-zero stats and a null file when nothing was captured (Active Memory not configured)", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "no-memory-search",
+        slug: "no-memory-search",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      expect(report.memory_search).toEqual({
+        active_memory: { calls: 0, hits_total: 0, chars_found: 0 },
+        explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+        file: null,
+      });
+    });
+
+    it("splits calls into active_memory and explicit buckets and sums hits/chars per bucket", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+      mockedCollectMemorySearchEvents.mockResolvedValueOnce([
+        { observedAt: "2026-08-01T00:00:01.000Z", source: "active_memory", tool: "memory_search", query: "wings", hits: 1, charsFound: 30, content: "x" },
+        { observedAt: "2026-08-01T00:00:02.000Z", source: "active_memory", tool: "memory_search", query: "wings", hits: 0, charsFound: 0, content: "" },
+        { observedAt: "2026-08-01T00:00:03.000Z", source: "explicit", tool: "memory_get", query: "memory/x.md", hits: 1, charsFound: 200, content: "y" },
+      ]);
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "memory-search-mixed",
+        slug: "memory-search-mixed",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      expect(report.memory_search.active_memory).toEqual({ calls: 2, hits_total: 1, chars_found: 30 });
+      expect(report.memory_search.explicit).toEqual({ calls: 1, hits_total: 1, chars_found: 200 });
+    });
+
+    it("adds one events-timeline entry per memory search/get call, labeled by source", async () => {
+      mockedFetchAuditEvents.mockResolvedValue([]);
+      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+      mockedCollectMemorySearchEvents.mockResolvedValueOnce([
+        { observedAt: "2026-08-01T00:00:01.000Z", source: "active_memory", tool: "memory_search", query: "wings", hits: 1, charsFound: 30, content: "x" },
+        { observedAt: "2026-08-01T00:00:02.000Z", source: "explicit", tool: "memory_get", query: "memory/x.md", hits: 1, charsFound: 200, content: "y" },
+      ]);
+
+      const { report } = await buildReport({
+        config: DEFAULT_CONFIG,
+        paths,
+        name: "memory-search-events",
+        slug: "memory-search-events",
+        mode: "start-stop",
+        tsStartMs: 0,
+        tsEndMs: 1000,
+      });
+
+      const memEvents = report.events.filter((e) => e.event.startsWith("memory "));
+      expect(memEvents).toEqual([
+        { date: "2026-08-01T00:00:01.000Z", event: "memory search (active-memory): 1 hit, 30 chars" },
+        { date: "2026-08-01T00:00:02.000Z", event: "memory get (explicit): 1 hit, 200 chars" },
+      ]);
+    });
   });
 
   describe("events timeline", () => {

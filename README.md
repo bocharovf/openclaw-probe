@@ -48,7 +48,7 @@ diagnose instead of looking like a bug.
 | The sender is authorized | The command sets `requireAuth: true` (default for chat commands). Authorization comes from `commands.allowFrom`, or otherwise from channel allowlists/pairing plus `commands.useAccessGroups`. | Unauthorized senders get no response; the command is silently ignored. |
 | `openclaw` is reachable in `PATH` for the Gateway process | Probe shells out to `openclaw audit --json` and `openclaw plugins list --json` for every report (see [Data sources](#data-sources)). | `/probe stop` / `/probe <range>` fails with a "Probe command failed" error instead of a report. Point `plugins.entries.probe.config.openclawBin` at an explicit path if `openclaw` isn't on the Gateway's `PATH`. |
 
-### Required for the core metrics (time, tokens, tool/skill usage, errors)
+### Required for the core metrics (time, tokens, tool/skill/memory-search usage, errors)
 
 | Setting | Needed because | Symptom if missing/wrong |
 | --- | --- | --- |
@@ -75,6 +75,19 @@ The one inherent limitation: it only recognizes a fixed set of read-tool names (
 `functions.read`, `read_file`, `filesystem.read`, `fs.read`); a skill loaded through some
 other, unrecognized read-tool alias would not be counted. This has not been observed in
 practice - OpenClaw's core file-read tool is named `read`.
+
+`memory_search` needs no separate config either, same footing as `skills_used`: no operator
+opt-in, no `hooks.allowConversationAccess`, nothing to install. Probe watches `after_tool_call`
+for `memory_search`/`memory_get` calls (the two tools OpenClaw's built-in `memory-core` memory
+backend registers) and classifies each one as `active_memory` or `explicit` using the calling
+session's `sessionKey`/`sessionId` - see [Data sources](#data-sources) for exactly how. If
+neither the [Active Memory plugin](https://docs.openclaw.ai/concepts/active-memory) nor memory
+search itself is configured on the host, `after_tool_call` simply never fires for these tool
+names and `memory_search` in the report reads all-zero with `file: null` - that is the expected
+"not configured" state, not an error. The one inherent limitation, same shape as the skill
+detection one above: it only recognizes the `memory-core` backend's tool names, not
+`memory_recall` (used by the `memory-lancedb` slot) or other memory plugins' custom recall
+tools - those calls are invisible to this detection and simply don't show up here.
 
 ### Optional - raw LLM request/response archive (`llm_api_log`)
 
@@ -183,7 +196,8 @@ the comma is what separates them) compares two saved reports and answers "what c
 between these two runs?" without you having to eyeball two JSON blobs by hand.
 
 - **Numeric fields** (`window.wall_clock_sec`, everything under `time`/`iterations`/`tokens`,
-  `context.system_prompt_chars_avg`, error `count`s, `llm_api_log.entries_captured`): the
+  `context.system_prompt_chars_avg`, error `count`s, `llm_api_log.entries_captured`,
+  `memory_search.active_memory`/`.explicit`'s `calls`/`hits_total`/`chars_found`): the
   reported value is **`name2 - name1`** - positive means it grew from name1 to name2,
   negative means it shrank. Either side is `null` (and so is the diff) if the source report
   had `null` there.
@@ -270,6 +284,18 @@ name2, diff }`, `DiffSet` = `{ added, removed }`).
     }
   },
   "llm_api_log": { "entries_captured": { "name1": 7, "name2": 9, "diff": 2 } },
+  "memory_search": {
+    "active_memory": {
+      "calls": { "name1": 2, "name2": 3, "diff": 1 },
+      "hits_total": { "name1": 1, "name2": 1, "diff": 0 },
+      "chars_found": { "name1": 412, "name2": 390, "diff": -22 }
+    },
+    "explicit": {
+      "calls": { "name1": 1, "name2": 0, "diff": -1 },
+      "hits_total": { "name1": 1, "name2": 0, "diff": -1 },
+      "chars_found": { "name1": 1187, "name2": 0, "diff": -1187 }
+    }
+  },
   "events": { "added": ["skill used: aiops-incident"], "removed": ["tool call: postgres_query"] },
   "warnings": { "added": [], "removed": [] }
 }
@@ -336,6 +362,11 @@ explanation attached to every section.
   "llm_api_log": {
     "entries_captured": 7,
     "file": "/root/.openclaw/state/plugins/probe/results/baseline.rawrequests.jsonl"
+  },
+  "memory_search": {
+    "active_memory": { "calls": 2, "hits_total": 1, "chars_found": 412 },   // the Active Memory plugin's own blocking-recall sub-agent
+    "explicit": { "calls": 1, "hits_total": 1, "chars_found": 1187 },        // memory_search/memory_get called directly in the agent's own session
+    "file": "/root/.openclaw/state/plugins/probe/results/baseline.memory-search.jsonl"
   },
   "events": [
     { "date": "2026-08-01T12:00:02.940Z", "event": "agent run: main (started, still running at window end)" },
@@ -414,6 +445,22 @@ see [Requirements](#requirements). `null`/`0` when raw capture is disabled or no
 or simply had nothing to capture. This is purely archival for close inspection of prompts -
 none of the numeric metrics above depend on it.
 
+**`memory_search`** - every `memory_search`/`memory_get` call in the window, split by who
+called it:
+- `active_memory` - calls made by the [Active Memory plugin](https://docs.openclaw.ai/concepts/active-memory)'s
+  own blocking-recall sub-agent, which runs automatically before a reply on eligible sessions.
+- `explicit` - calls made directly inside the agent's own session (for example following
+  AGENTS.md guidance to search memory before answering about prior work).
+
+Each bucket has `calls` (how many `memory_search`/`memory_get` calls), `hits_total` (summed
+result count - matched chunks for `memory_search`, 1 or 0 for `memory_get` depending on
+whether it returned text), and `chars_found` (summed character count of what was found).
+`file` is the path to a `.memory-search.jsonl` sidecar with the **full found content** for
+every call in the window (query, source, hits, chars, and the actual snippets/text) - `null`
+when nothing was captured. All-zero with `file: null` is the expected state when neither
+Active Memory nor explicit memory search happened in the window (including when neither is
+configured on the host at all) - see [Requirements](#requirements).
+
 **`events`** - a chronological timeline merging everything else in the report into one log:
 `{ "date": "<ISO timestamp>", "event": "<short description>" }` entries, sorted ascending.
 One entry per:
@@ -426,7 +473,9 @@ One entry per:
   suffixes as agent runs;
 - LLM call - `"LLM call: <provider>/<model>"`, with `" (with tool call)"` appended when that
   completion produced a tool call;
-- skill use - `"skill used: <name>"`.
+- skill use - `"skill used: <name>"`;
+- memory search/get - `"memory search (active-memory): <hits> hit(s), <chars> chars"` or
+  `"memory get (explicit): <hits> hit(s), <chars> chars"`.
 
 There is no separate `"date"`/`"time"` split and no cap on array length - a busy scenario
 (many tool calls, several sub-agents) produces a correspondingly long list. Useful for
@@ -446,6 +495,7 @@ report could read it.
 | Time, agent/tool run pairing, errors, tool names, session/agent ids | `openclaw audit --json --after <ms> --before <ms>` (paginated). Metadata-only, 30-day / 100,000-row retention - see [Audit records](https://docs.openclaw.ai/cli/audit). |
 | Tokens, LLM call count, tool-calling rounds, models used, context size | Each involved run's trajectory file: `<base>/agents/<agentId>/sessions/<sessionId>.trajectory.jsonl` (`model.completed` and `context.compiled` events). |
 | Skill usage | This plugin's own `after_tool_call` hook handler, watching for a read-family tool call whose target file's basename is `SKILL.md` and recovering the skill's declared name from the file content's YAML frontmatter (falling back to the containing directory's name). Written to `<base>/logs/probe/skill-usage/<date>.jsonl`, filtered by timestamp - independent of the `skill-usage` plugin. Skills are not invoked through a dedicated tool call in OpenClaw; reading their `SKILL.md` *is* how a skill gets used (see [docs/tools/skills.md](https://docs.openclaw.ai/tools/skills)). |
+| Memory search usage | This plugin's own `after_tool_call` hook handler, watching for `memory_search`/`memory_get` calls and reading the result's parsed `results`/`text` fields for hit count and character count. Classified `active_memory` vs `explicit` by the call's `sessionKey`/`sessionId` (Active Memory's blocking-recall sub-agent runs under a synthetic `active-memory-<...>` session id and a `sessionKey` with a `:active-memory:<hash>` suffix - confirmed via `openclaw audit --json`, not documented as public API, see [CLAUDE.md](CLAUDE.md)). Written to `<base>/logs/probe/memory-search/<date>.jsonl`, filtered by timestamp. |
 | Tool -> plugin ownership | `openclaw plugins list --json`, each plugin's manifest-declared `contracts.tools` (no plugin runtimes are loaded to compute this, so it stays fast regardless of how many plugins are installed). |
 | Raw LLM request/response archive | This plugin's own `llm_input`/`llm_output` hook handlers, written to `<base>/logs/probe/llm-api/<date>.jsonl` - independent of the `llm-api-logger` plugin. |
 
@@ -502,9 +552,11 @@ npm run plugin:install   # build + `openclaw plugins install . --force`
 Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts`
 (trajectory-file readers), `src/llmCapture.ts` (hook-based raw LLM log capture),
 `src/skillUsage.ts` (hook-based skill-use detection and its own log capture/collection),
-`src/report.ts` (aggregation), `src/diff.ts` (comparing two reports into a `ProbeDiffReport`),
-`src/commands.ts` (`/probe` argument parsing and dispatch), `src/format.ts` (verbose
-report/diff rendering), `src/index.ts` (plugin registration).
+`src/memorySearchUsage.ts` (hook-based memory_search/memory_get detection, active_memory vs
+explicit classification, and its own log capture/collection), `src/report.ts` (aggregation),
+`src/diff.ts` (comparing two reports into a `ProbeDiffReport`), `src/commands.ts` (`/probe`
+argument parsing and dispatch), `src/format.ts` (verbose report/diff rendering), `src/index.ts`
+(plugin registration).
 
 ## License
 

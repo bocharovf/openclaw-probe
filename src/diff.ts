@@ -126,6 +126,18 @@ export function buildDiff(
     llm_api_log: {
       entries_captured: numDiff(report1.llm_api_log.entries_captured, report2.llm_api_log.entries_captured),
     },
+    memory_search: {
+      active_memory: {
+        calls: numDiff(report1.memory_search.active_memory.calls, report2.memory_search.active_memory.calls),
+        hits_total: numDiff(report1.memory_search.active_memory.hits_total, report2.memory_search.active_memory.hits_total),
+        chars_found: numDiff(report1.memory_search.active_memory.chars_found, report2.memory_search.active_memory.chars_found),
+      },
+      explicit: {
+        calls: numDiff(report1.memory_search.explicit.calls, report2.memory_search.explicit.calls),
+        hits_total: numDiff(report1.memory_search.explicit.hits_total, report2.memory_search.explicit.hits_total),
+        chars_found: numDiff(report1.memory_search.explicit.chars_found, report2.memory_search.explicit.chars_found),
+      },
+    },
     events: setDiff(eventTexts(report1.events), eventTexts(report2.events)),
     warnings: setDiff(report1.warnings, report2.warnings),
   };

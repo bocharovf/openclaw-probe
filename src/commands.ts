@@ -33,6 +33,7 @@ const REQUIRED_REPORT_FIELDS = [
   "skills_used",
   "errors",
   "llm_api_log",
+  "memory_search",
   "events",
   "warnings",
 ] as const;

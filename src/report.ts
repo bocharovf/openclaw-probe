@@ -1,7 +1,8 @@
 import { fetchAuditEvents, fetchToolToPluginMap } from "./cli.js";
 import { collectRawLlmEntries, writeRawLlmEntriesFile } from "./llmCapture.js";
+import { collectMemorySearchEvents, writeMemorySearchEntriesFile } from "./memorySearchUsage.js";
 import type { ProbePaths } from "./paths.js";
-import { rawRequestsPath } from "./store.js";
+import { memorySearchResultsPath, rawRequestsPath } from "./store.js";
 import { collectSkillUsageEvents } from "./skillUsage.js";
 import { extractSystemPromptChars, findContextCompiledNear, findModelCompleted } from "./trajectory.js";
 import type { AuditEvent, ProbeConfig, ProbeEvent, ProbeMode, ProbeReport, RunWindow, SkillUsageEntry } from "./types.js";
@@ -25,6 +26,19 @@ function describeOutcome(status: string, errorCode: string | undefined, duration
   if (status !== "succeeded") parts.push(errorCode ? `${status}: ${errorCode}` : status);
   if (durationMs !== undefined) parts.push(fmtDuration(durationMs));
   return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+/** True for a run window that belongs to the Active Memory plugin's own blocking-recall
+ * sub-agent, not a normal agent turn - see `memorySearchUsage.ts` for how this signal was
+ * found (live-confirmed via `openclaw audit --json`: its runs carry a synthetic
+ * `active-memory-<...>` sessionId and a sessionKey with a `:active-memory:<hash>` suffix).
+ * Used only to skip the "trajectory not found" warning for these runs below - their
+ * transcripts are ephemeral by design (`persistTranscripts: false` by default), so a missing
+ * trajectory is expected, not a real gap the warning should flag. Everything else about these
+ * runs (agent_runs/agents_used/tools_used counts) is left as-is; only the warning is skipped,
+ * matching the requested scope. */
+function isActiveMemoryRunWindow(rw: RunWindow): boolean {
+  return rw.sessionId.startsWith("active-memory-") || (rw.sessionKey?.includes(":active-memory:") ?? false);
 }
 
 /** Collapses started/finished audit events into one pair per correlation key (runId or
@@ -102,6 +116,7 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     runWindows.push({
       agentId: finished.agentId ?? "unknown",
       sessionId: finished.sessionId ?? "unknown",
+      sessionKey: finished.sessionKey ?? started.sessionKey,
       runId: finished.runId ?? "unknown",
       startedMs: started.occurredAt,
       finishedMs: finished.occurredAt,
@@ -152,9 +167,11 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   for (const rw of runWindows) {
     const mc = await findModelCompleted(paths.agentsDir, rw.agentId, rw.sessionId, rw.runId);
     if (!mc) {
-      warnings.push(
-        `trajectory model.completed not found for run_id=${rw.runId} (rotated/deleted trajectory file, or run still in flight)`,
-      );
+      if (!isActiveMemoryRunWindow(rw)) {
+        warnings.push(
+          `trajectory model.completed not found for run_id=${rw.runId} (rotated/deleted trajectory file, or run still in flight)`,
+        );
+      }
       continue;
     }
     const usage = ((mc.data as { usage?: Record<string, number> } | undefined)?.usage ?? {}) as Record<
@@ -226,6 +243,26 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     timeline.push({ date: event.observedAt, event: `skill used: ${event.skillName}` });
   }
 
+  // ---- memory search (windowed from probe's own after_tool_call-based detection log) ----
+  const memorySearchEvents = await collectMemorySearchEvents(paths.memorySearchLogDir, tsStartMs, tsEndMs);
+  const memorySearchStats = {
+    active_memory: { calls: 0, hits_total: 0, chars_found: 0 },
+    explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+  };
+  for (const event of memorySearchEvents) {
+    const bucket = memorySearchStats[event.source];
+    bucket.calls += 1;
+    bucket.hits_total += event.hits;
+    bucket.chars_found += event.charsFound;
+    const verb = event.tool === "memory_search" ? "search" : "get";
+    const sourceLabel = event.source === "active_memory" ? "active-memory" : "explicit";
+    timeline.push({
+      date: event.observedAt,
+      event: `memory ${verb} (${sourceLabel}): ${event.hits} hit${event.hits === 1 ? "" : "s"}, ${event.charsFound} chars`,
+    });
+  }
+  const memorySearchFile = await writeMemorySearchEntriesFile(memorySearchResultsPath(paths, slug), memorySearchEvents);
+
   // ---- tool -> plugin ownership ----
   const toolToPlugin = await fetchToolToPluginMap(config).catch(() => new Map<string, string>());
   const pluginsUsed = [...new Set(Object.keys(toolsUsed).map((t) => toolToPlugin.get(t) ?? "core"))].sort();
@@ -282,6 +319,7 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       },
     },
     llm_api_log: { entries_captured: rawEntries.length, file: rawFile },
+    memory_search: { ...memorySearchStats, file: memorySearchFile },
     events: timeline.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)),
     warnings,
   };

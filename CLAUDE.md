@@ -187,6 +187,57 @@ answers "did X start/stop being used at all," not "how many times," which
 is also why `events`/`tools_used`/etc have no per-item count in the diff
 output in the first place.
 
+**The Active Memory plugin's blocking-recall sub-agent is identifiable via
+`sessionKey`/`sessionId`, not a separate `agentId` — confirmed live via
+`openclaw audit --json`, not documented as public API.** Its
+`memory_search`/`memory_get` calls carry `agentId: "main"` (same as the
+main agent), but `sessionId` is a synthetic `active-memory-<...>` id and
+`sessionKey` is the main session's own key with a `:active-memory:<hash>`
+suffix appended (e.g. `agent:main:telegram:direct:868326324:active-memory:
+845bf794172a`). `memorySearchUsage.ts`'s `classifySource()` and
+`report.ts`'s `isActiveMemoryRunWindow()` both check for this — `sessionKey`
+containing `:active-memory:` first, `sessionId` starting with
+`active-memory-` as a fallback (covers the case where a hook's `ctx` has
+`sessionId` but not `sessionKey`). If OpenClaw ever changes this synthetic
+naming scheme, both checks need updating together. Do not key off `agentId`
+for this — it will not distinguish an Active Memory recall from anything
+else the main agent does.
+
+**Active Memory's own agent runs already flowed into `agents_used`/
+`agent_runs`/`tools_used`/error counts before this feature existed, and
+still do — only the "trajectory not found" warning is suppressed for
+them.** Its transcripts are ephemeral by default (`persistTranscripts:
+false`), so every Active Memory recall used to add a spurious `trajectory
+model.completed not found for run_id=...` warning to every report that
+happened to overlap one — observed live in a real test measurement before
+this fix. `isActiveMemoryRunWindow()` in `report.ts` is checked only at the
+one `if (!mc) { ... }` branch that pushes that specific warning; it
+deliberately does **not** exclude these runs from `agent_runs`,
+`agents_used`, `tool_calls_total`, `tools_used.memory_search`, or error
+counts — narrower scope, explicitly requested, not an oversight. If a
+future request wants Active Memory's own overhead excluded from those
+counts too, that is a separate, bigger change (would need its own
+before/after regression tests for each affected field, since several of
+them are computed independently of `runWindows`).
+
+**Both `memory_search` and `memory_get`'s tool results carry their
+structured data twice: JSON-stringified in `content[0].text` (what the
+model reads) and, live-confirmed on this host's OpenClaw build, already
+parsed in a sibling `details` object.** Confirmed by triggering real calls
+through `chat.send` and reading the resulting trajectory file directly
+(not by reading OpenClaw's source — the minified `dist/*.js` bundle wasn't
+worth reverse-engineering for this). Shapes:
+`memory_search` → `{ results: [{ path, startLine, endLine, score,
+snippet, source, citation, corpus }], provider, model, debug: { hits,
+searchMs, toolMs, ... } }`; `memory_get` → `{ text, path, from, lines }`.
+`memorySearchUsage.ts`'s `extractDetails()` prefers `result.details`
+(no parsing needed) and only falls back to `JSON.parse`-ing
+`content[0].text` if `.details` is absent — keep that order; a future
+OpenClaw build could plausibly drop the redundant `details` field, but
+there's no live evidence yet that it does. Never assume this shape without
+checking a real captured trajectory first — it is not documented anywhere
+in `docs/`.
+
 ## Dev workflow
 
 ```bash

@@ -20,6 +20,11 @@ function baseReport(overrides: Partial<ProbeReport> = {}): ProbeReport {
       agent_run_errors: { count: 0, by_status: {}, by_code: {} },
     },
     llm_api_log: { entries_captured: 1, file: "/x/r1.rawrequests.jsonl" },
+    memory_search: {
+      active_memory: { calls: 0, hits_total: 0, chars_found: 0 },
+      explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+      file: null,
+    },
     events: [{ date: "2026-08-01T00:00:05.000Z", event: "tool call: read (0.1s)" }],
     warnings: [],
     ...overrides,
@@ -221,6 +226,34 @@ describe("buildDiff", () => {
     const r2 = baseReport({ warnings: [] });
     const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
     expect(d.warnings).toEqual({ added: [], removed: ["missing trajectory for run xyz"] });
+  });
+
+  it("memory_search sub-stats diff numerically per source", () => {
+    const r1 = baseReport({
+      memory_search: {
+        active_memory: { calls: 3, hits_total: 2, chars_found: 500 },
+        explicit: { calls: 1, hits_total: 1, chars_found: 200 },
+        file: "/x/r1.memory-search.jsonl",
+      },
+    });
+    const r2 = baseReport({
+      memory_search: {
+        active_memory: { calls: 5, hits_total: 1, chars_found: 300 },
+        explicit: { calls: 0, hits_total: 0, chars_found: 0 },
+        file: null,
+      },
+    });
+    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
+    expect(d.memory_search.active_memory).toEqual({
+      calls: { name1: 3, name2: 5, diff: 2 },
+      hits_total: { name1: 2, name2: 1, diff: -1 },
+      chars_found: { name1: 500, name2: 300, diff: -200 },
+    });
+    expect(d.memory_search.explicit).toEqual({
+      calls: { name1: 1, name2: 0, diff: -1 },
+      hits_total: { name1: 1, name2: 0, diff: -1 },
+      chars_found: { name1: 200, name2: 0, diff: -200 },
+    });
   });
 
   it("identical reports produce empty sets and zero numeric diffs", () => {
