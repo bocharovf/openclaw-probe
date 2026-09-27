@@ -1,23 +1,43 @@
 import { buildDiff } from "./diff.js";
 import { buildReport } from "./report.js";
+import { generateExplanations } from "./explainLlm.js";
+import { renderExplainHtml } from "./explainHtml.js";
 import type { ProbePaths } from "./paths.js";
 import { slugify } from "./paths.js";
+import {
+  buildSessionGraph,
+  resolveAgentIdentity,
+  resolveConfiguredAgentIds,
+  resolveRootSession,
+  type SessionRefFallback,
+} from "./sessionGraph.js";
 import {
   clearActiveMarker,
   deleteResult,
   diffResultPath,
+  explainResultPath,
   listResults,
   readActiveMarker,
+  readExplainResult,
   readResult,
   writeActiveMarker,
   writeDiffResult,
+  writeExplainMediaCopy,
+  writeExplainResult,
   writeResult,
 } from "./store.js";
 import { formatVerboseDiff, formatVerboseReport } from "./format.js";
-import { ProbeUserError, type PluginLogger, type ProbeConfig, type ProbeReport } from "./types.js";
+import {
+  ProbeUserError,
+  type AgentIdentity,
+  type ExplainRuntimeApi,
+  type PluginLogger,
+  type ProbeConfig,
+  type ProbeReport,
+} from "./types.js";
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-const RESERVED_NAMES = new Set(["start", "stop", "verbose", "list", "delete", "diff"]);
+const RESERVED_NAMES = new Set(["start", "stop", "verbose", "list", "delete", "diff", "explain"]);
 const LIST_LIMIT = 50;
 const REQUIRED_REPORT_FIELDS = [
   "probe",
@@ -58,9 +78,16 @@ const HELP_TEXT = [
   "                                            plugin/skill/model/event/etc list is a set difference",
   "                                            name2-name1, shown as \"+added\" / \"-removed\". The diff",
   "                                            is also saved as <name1>.<name2>.diff.json.",
+  "  /probe explain [session]                 explain a SESSION (not a measurement) in natural",
+  "  /probe explain refresh [session]         language, as an HTML report attached to the reply.",
+  "                                            [session] is a session id or full session key;",
+  "                                            omit it to explain the session you're chatting in.",
+  "                                            Includes every sub-agent session spawned from it.",
+  "                                            Cached after the first run - use `refresh` to",
+  "                                            regenerate (costs a new LLM call).",
   "",
-  "A probe name cannot be \"start\", \"stop\", \"verbose\", \"list\", \"delete\", or \"diff\", or look like",
-  "two timestamps. Only one `start`ed measurement can be active at a time.",
+  "A probe name cannot be \"start\", \"stop\", \"verbose\", \"list\", \"delete\", \"diff\", or \"explain\", or",
+  "look like two timestamps. Only one `start`ed measurement can be active at a time.",
 ].join("\n");
 
 type Command =
@@ -73,6 +100,7 @@ type Command =
   | { type: "list" }
   | { type: "delete"; name: string }
   | { type: "diff"; name1: string; name2: string; verbose: boolean }
+  | { type: "explain"; sessionRef?: string; refresh: boolean }
   | { type: "error"; message: string };
 
 export function parseProbeArgs(raw: string): Command {
@@ -134,6 +162,14 @@ export function parseProbeArgs(raw: string): Command {
     return { type: "diff", name1, name2, verbose };
   }
 
+  if (head === "explain") {
+    const rest = tokens.slice(1);
+    const refresh = rest[0]?.toLowerCase() === "refresh";
+    const refTokens = refresh ? rest.slice(1) : rest;
+    const sessionRef = refTokens.join(" ").trim() || undefined;
+    return { type: "explain", sessionRef, refresh };
+  }
+
   if (tokens.length >= 2 && ISO_RE.test(tokens[0]) && ISO_RE.test(tokens[1])) {
     const name = tokens.slice(2).join(" ").trim();
     if (!name) return { type: "range", startIso: tokens[0], endIso: tokens[1] };
@@ -156,45 +192,65 @@ function validateProbeName(name: string): string | null {
   return null;
 }
 
+/** Runtime dependencies for `/probe explain` only - kept separate and optional because every
+ * other command works from just config/paths/logger. Missing this when an "explain" command
+ * actually runs is a plugin wiring bug (index.ts always provides it), not a normal user-facing
+ * error path, but `handleExplain` still reports it as a ProbeUserError instead of crashing. */
+export type ExplainDeps = {
+  api: ExplainRuntimeApi;
+  /** Full OpenClawConfig (loosely typed - see types.ts), for agents.list[] lookups. */
+  rawConfig: unknown;
+  invokingSession: SessionRefFallback;
+};
+
 export type CommandDeps = {
   config: ProbeConfig;
   paths: ProbePaths;
   logger: PluginLogger;
+  explain?: ExplainDeps;
 };
 
-export async function runProbeCommand(raw: string, deps: CommandDeps): Promise<string> {
+export type ProbeCommandResult = {
+  text: string;
+  mediaUrl?: string;
+};
+
+export async function runProbeCommand(raw: string, deps: CommandDeps): Promise<ProbeCommandResult> {
   const cmd = parseProbeArgs(raw);
 
   switch (cmd.type) {
     case "help":
-      return HELP_TEXT;
+      return { text: HELP_TEXT };
 
     case "error":
-      return `${cmd.message}\n\n${HELP_TEXT}`;
+      return { text: `${cmd.message}\n\n${HELP_TEXT}` };
 
     case "start":
-      return handleStart(cmd.name, deps);
+      return { text: await handleStart(cmd.name, deps) };
 
     case "stop":
-      return handleStop(deps);
+      return { text: await handleStop(deps) };
 
     case "range":
-      return handleRange(cmd.startIso, cmd.endIso, cmd.name, deps);
+      return { text: await handleRange(cmd.startIso, cmd.endIso, cmd.name, deps) };
 
     case "show":
-      return handleShow(cmd.name, deps);
+      return { text: await handleShow(cmd.name, deps) };
 
     case "verbose":
-      return handleVerbose(cmd.name, deps);
+      return { text: await handleVerbose(cmd.name, deps) };
 
     case "list":
-      return handleList(deps);
+      return { text: await handleList(deps) };
 
     case "delete":
-      return handleDelete(cmd.name, deps);
+      return { text: await handleDelete(cmd.name, deps) };
 
     case "diff":
-      return handleDiff(cmd.name1, cmd.name2, cmd.verbose, deps);
+      return { text: await handleDiff(cmd.name1, cmd.name2, cmd.verbose, deps) };
+
+    case "explain":
+      return handleExplain(cmd.sessionRef, cmd.refresh, deps);
   }
 }
 
@@ -388,4 +444,104 @@ async function handleDiff(name1: string, name2: string, verbose: boolean, deps: 
     JSON.stringify(diffReport, null, 2),
     "```",
   ].join("\n");
+}
+
+/** `/probe explain [session]` operates on a SESSION (root + every sub-agent session spawned
+ * from it), not a saved measurement - see sessionGraph.ts/explainLlm.ts/explainHtml.ts. Result
+ * is cached to `<slug>.explain.html` (slug = slugify(root sessionKey)); a bare re-run just
+ * re-serves the cached file (no new LLM cost) unless `refresh` was given. */
+async function handleExplain(
+  sessionRef: string | undefined,
+  refresh: boolean,
+  deps: CommandDeps,
+): Promise<ProbeCommandResult> {
+  if (!deps.explain) {
+    throw new ProbeUserError(
+      "/probe explain is unavailable - the plugin was not wired with runtime access to session/LLM " +
+        "helpers. This indicates a plugin bug, not a usage error.",
+    );
+  }
+  const { api, rawConfig, invokingSession } = deps.explain;
+
+  const agentIds = resolveConfiguredAgentIds(rawConfig);
+  const root = await resolveRootSession(api, agentIds, sessionRef, invokingSession);
+  if (!root) {
+    throw new ProbeUserError(
+      sessionRef
+        ? `No session found matching "${sessionRef}". Give either the session id (a UUID) or the ` +
+          `full session key (e.g. "agent:main:hook:..."), exactly as OpenClaw shows it.`
+        : "Could not determine which session to explain from this invocation. Run " +
+          "`/probe explain <sessionId-or-sessionKey>` with an explicit reference instead.",
+    );
+  }
+
+  const slug = slugify(root.sessionKey);
+  const refLabel = sessionRef ?? root.sessionKey;
+
+  if (!refresh) {
+    const cachedHtml = await readExplainResult(deps.paths, slug);
+    if (cachedHtml !== null) {
+      const mediaPath = await writeExplainMediaCopy(slug, cachedHtml);
+      return {
+        text: [
+          `Explanation for "${root.sessionKey}" was already generated - showing the cached report ` +
+            `(${explainResultPath(deps.paths, slug)}).`,
+          `Run \`/probe explain refresh ${refLabel}\` to regenerate it (this calls the LLM again).`,
+          mediaPath ? undefined : "Could not attach the file to this reply - read it from the path above.",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        mediaUrl: mediaPath ?? undefined,
+      };
+    }
+  }
+
+  const nodes = await buildSessionGraph(api, deps.paths.agentsDir, agentIds, root);
+  const allRuns = nodes.flatMap((n) => n.runs).sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  if (allRuns.length === 0) {
+    throw new ProbeUserError(
+      `No completed runs found for session "${root.sessionKey}" (checked ${nodes.length} session(s), ` +
+        `including any spawned sub-agents). Its trajectory may be empty, still in progress, or ` +
+        `already pruned by session retention.`,
+    );
+  }
+
+  const agentIdentities: Record<string, AgentIdentity> = {};
+  for (const node of nodes) {
+    agentIdentities[node.agentId] ??= resolveAgentIdentity(rawConfig, node.agentId);
+  }
+
+  const { explainedRuns, usage, warnings } = await generateExplanations(
+    api,
+    allRuns,
+    agentIdentities,
+    { language: deps.config.explain.language, model: deps.config.explain.model, modelFallback: deps.config.explain.modelFallback },
+    deps.logger,
+  );
+
+  const generatedAt = new Date().toISOString();
+  const html = renderExplainHtml({
+    rootSessionKey: root.sessionKey,
+    generatedAt,
+    language: deps.config.explain.language,
+    sessionsIncluded: nodes.length,
+    runs: explainedRuns,
+    agentIdentities,
+    usage,
+    warnings,
+  });
+  const path = await writeExplainResult(deps.paths, slug, html);
+  const mediaPath = await writeExplainMediaCopy(slug, html);
+
+  const summary = [
+    `Explained "${root.sessionKey}" - ${nodes.length} session(s), ${explainedRuns.length} run(s).`,
+    `Saved to ${path}.`,
+    `Explanation cost: $${usage.costUsd.toFixed(4)} (${usage.totalTokens} tokens).`,
+    warnings.length ? `Warnings: ${warnings.join("; ")}` : undefined,
+    mediaPath ? undefined : "Could not attach the file to this reply - read it from the path above.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return { text: summary, mediaUrl: mediaPath ?? undefined };
 }

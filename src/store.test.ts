@@ -3,7 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolvePaths } from "./paths.js";
-import { deleteResult, diffResultPath, listResults, rawRequestsPath, readResult, writeDiffResult, writeResult } from "./store.js";
+import {
+  deleteResult,
+  diffResultPath,
+  explainResultPath,
+  listResults,
+  rawRequestsPath,
+  readExplainResult,
+  readResult,
+  writeDiffResult,
+  writeExplainMediaCopy,
+  writeExplainResult,
+  writeResult,
+} from "./store.js";
 import type { ProbeDiffReport, ProbeReport } from "./types.js";
 
 async function exists(path: string): Promise<boolean> {
@@ -226,5 +238,49 @@ describe("deleteResult", () => {
 
     expect(await readResult(paths, "delete-me")).toBeNull();
     expect(await readResult(paths, "keep-me")).not.toBeNull();
+  });
+});
+
+describe("explain result storage", () => {
+  let baseDir: string;
+  let paths: ReturnType<typeof resolvePaths>;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "probe-explain-store-"));
+    paths = resolvePaths(baseDir);
+  });
+
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it("readExplainResult returns null when nothing has been generated yet", async () => {
+    expect(await readExplainResult(paths, "some-slug")).toBeNull();
+  });
+
+  it("writeExplainResult writes to explainResultPath, and readExplainResult reads it back", async () => {
+    const path = await writeExplainResult(paths, "agent-main-x", "<html>hi</html>");
+    expect(path).toBe(explainResultPath(paths, "agent-main-x"));
+    expect(await readExplainResult(paths, "agent-main-x")).toBe("<html>hi</html>");
+  });
+
+  it("writeExplainMediaCopy writes a second copy under the given trusted tmp dir and returns its path", async () => {
+    const trustedTmpDir = await mkdtemp(join(tmpdir(), "probe-explain-trusted-"));
+    try {
+      const path = await writeExplainMediaCopy("agent-main-x", "<html>hi</html>", trustedTmpDir);
+      expect(path).toBe(join(trustedTmpDir, "probe-explain", "agent-main-x.explain.html"));
+      expect(await readFile(path!, "utf-8")).toBe("<html>hi</html>");
+    } finally {
+      await rm(trustedTmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writeExplainMediaCopy returns null instead of throwing when the trusted dir can't be written", async () => {
+    // A path under a file (not a directory) can never be created - deterministic failure
+    // without needing real permission games.
+    const blockerFile = join(baseDir, "blocker");
+    await writeFileRaw(blockerFile, "x");
+    const path = await writeExplainMediaCopy("agent-main-x", "<html>hi</html>", join(blockerFile, "nested"));
+    expect(path).toBeNull();
   });
 });

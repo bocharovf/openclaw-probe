@@ -238,6 +238,94 @@ there's no live evidence yet that it does. Never assume this shape without
 checking a real captured trajectory first — it is not documented anywhere
 in `docs/`.
 
+**A local `mediaUrl` in a plugin command reply is silently rejected unless
+the file lives inside OpenClaw's own trusted temp directory — this is
+undocumented, internal host behavior, found only by reading compiled
+source after a live failure.** First attempt pointed `mediaUrl` at
+`/probe explain`'s durable copy in `probeResultsDir`; the reply came back
+with `⚠️ Media failed.` and gateway logs showed:
+`LocalMediaAccessError: hostReadCapability permits only validated
+plain-text documents and trusted generated HTML reports for local reads`.
+Traced it into `dist/web-media-*.js`: a local `text/html` `mediaUrl` is
+only accepted when `isTrustedGeneratedHostReadHtmlPath()` — realpath of
+the file must resolve inside realpath of
+`resolvePreferredOpenClawTmpDir()`, plus the file must be a real file (not
+a symlink) with `nlink === 1` (not a hardlink) — passes.
+`resolvePreferredOpenClawTmpDir()` prefers the fixed POSIX path
+`/tmp/openclaw` (falls back to a uid-scoped `os.tmpdir()` path only if
+that's unwritable/unsafe). None of this is exposed via `api.runtime` or
+documented in `docs/plugins/`. Fix (`store.ts`'s
+`writeExplainMediaCopy`): write a **second, disposable** copy of the
+report into `/tmp/openclaw/probe-explain/<slug>.explain.html` — hardcoded
+to match the confirmed-live constant, not derived from any plugin API —
+and point `mediaUrl` at that copy, not the durable one in
+`probeResultsDir`. `writeExplainMediaCopy` takes the trusted root as an
+optional param (defaults to `/tmp/openclaw`) specifically so tests don't
+touch the real path — always mock it in `commands.test.ts` rather than
+letting real explain-command tests write there. If this constant ever
+changes upstream, `writeExplainMediaCopy` fails closed (returns null) and
+`handleExplain` degrades to a text-only reply (the durable path is always
+in the text) instead of crashing — don't remove that fallback.
+
+**A flat `maxTokens` budget for `/probe explain`'s LLM calls silently
+truncates the response mid-JSON on a busy session — caught live on a real
+5-session/9-run/~50-tool-call incident, not a synthetic test.** A fixed
+2000-token cap cut the response off partway through run 2 of 9; the
+truncated JSON then failed to parse, and the (perfectly good, on-topic)
+content up to the cut was discarded along with it — this was a budget
+problem, not a model-quality one. Fix (`explainLlm.ts`): `maxTokens` per
+chunk now scales with that chunk's actual content
+(`totalToolCalls * 100 + runCount * 80`, clamped to
+`[1500, 8000]`) instead of one constant for every chunk size. A single run
+with an extreme number of tool calls (past what an 8000-token response can
+cover) can still truncate — accepted as a rare edge case; that chunk falls
+back to "explanation unavailable" for its own runs only (see the parse-failure
+path), it doesn't fail the whole report. `explainLlm.ts`'s parse-failure
+branch also logs the first 4000 chars of the raw unparsable response via
+`logger.warn` — keep this, it's how the truncation was actually diagnosed
+(journald splits multi-line log messages across entries; query with
+`journalctl ... -o json` and reassemble `MESSAGE` fields rather than
+trusting the default single-line rendering, which truncates at the first
+embedded newline).
+
+**`trace.artifacts.toolMetas` (one per completed run), not
+`messagesSnapshot`, is `/probe explain`'s data source for tool calls —
+deliberate, not an oversight.** `messagesSnapshot`'s per-message
+timestamps were already found unreliable on a long session (see the
+`llm_calls` fallback gotcha above); `toolMetas` has no such issue observed
+so far, is already ordered, already human-readable, and already
+host-redacted in places (`TOKEN=***`). `sessionGraph.ts`'s
+`findAllRunTraces` (in `trajectory.ts`) is the only reader of it. Don't
+reach for `messagesSnapshot` for this feature without a fresh live reason
+— it would reintroduce a staleness risk this design specifically avoids.
+
+**Sub-agent sessions are discovered via `spawnedBy` in
+`agents/<agentId>/sessions/sessions.json`, not by correlating
+`sessions_spawn` tool calls to child sessions by timestamp.** Confirmed
+live on a real swarm incident: a child session's store entry
+(`api.runtime.agent.session.listSessionEntries({agentId})`) carries
+`spawnedBy` set to the **parent's own `sessionKey`**, verbatim — walking
+that chain (breadth-first, `sessionGraph.ts`'s `buildSessionGraph`) is
+exact and doesn't depend on guessing from timing or task-description text
+overlap. Search every configured agent id's session store, not just the
+parent's own agent id — a sub-agent's session lives under **its own**
+agentId's store (`agents/diag-k8s/sessions/sessions.json`, not
+`agents/main/sessions/sessions.json`), which is also why
+`resolveConfiguredAgentIds()` always includes `main` plus every
+`agents.list[].id`, not just whichever agent happened to invoke the
+command.
+
+**`api.runtime.llm.complete(...)` (docs/plugins/sdk-runtime.md) is the
+correct way for a plugin to call an LLM directly — no sub-agent spawn, no
+tool access needed.** Confirmed live: works with zero extra config when
+`model` is left unset (falls back to the target agent's configured
+model); an explicit `model` override requires the operator to opt in via
+`plugins.entries.probe.llm.allowModelOverride: true`, otherwise the
+override is silently ignored (per the docs, not independently
+re-verified live — no live test was run *without* the flag set). Returns
+real `usage`/`costUsd` — shown in the explain report and reply text, not
+estimated.
+
 ## Dev workflow
 
 ```bash

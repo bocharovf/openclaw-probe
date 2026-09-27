@@ -1,8 +1,8 @@
 {
   "id": "probe",
   "name": "Probe",
-  "description": "Measures agent run cost, speed, and behavior over a time window (tokens, time breakdown, tool/skill usage, errors, raw LLM request/response archive) via /probe chat commands, for before/after experiments on agent changes.",
-  "version": "0.3.0",
+  "description": "Measures agent run cost, speed, and behavior over a time window (tokens, time breakdown, tool/skill usage, errors, raw LLM request/response archive) via /probe chat commands, for before/after experiments on agent changes. Also explains a session's actions in natural language as an HTML report via /probe explain.",
+  "version": "0.4.0",
   "uiHints": {
     "openclawBin": {
       "label": "OpenClaw CLI binary",
@@ -31,6 +31,19 @@
     "llmLog.redactSecrets": {
       "label": "Redact secret-shaped values",
       "help": "Redact values that look like API keys/tokens/JWTs in the captured raw request/response before writing to disk (recommended)."
+    },
+    "explain.model": {
+      "label": "Explanation model override",
+      "help": "Model ref (\"provider/model\") for /probe explain's natural-language interpretation. Unset uses the target agent's configured model. Setting this requires plugins.entries.probe.llm.allowModelOverride=true in config - see README."
+    },
+    "explain.modelFallback": {
+      "label": "Explanation model fallback",
+      "help": "Used only if `explain.model` is set but cannot be resolved."
+    },
+    "explain.language": {
+      "label": "Explanation language",
+      "placeholder": "en",
+      "help": "Natural language for /probe explain's generated explanations, e.g. \"en\" or \"ru\". Free text passed into the prompt."
     }
   },
   "configSchema": {
@@ -64,6 +77,22 @@
           "redactSecrets": {
             "type": "boolean",
             "default": true
+          }
+        }
+      },
+      "explain": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "modelFallback": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string",
+            "default": "en"
           }
         }
       }

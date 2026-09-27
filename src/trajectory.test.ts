@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { extractSystemPromptChars, findContextCompiledNear, findModelCompleted } from "./trajectory.js";
+import { extractSystemPromptChars, findAllRunTraces, findContextCompiledNear, findModelCompleted } from "./trajectory.js";
 
 describe("trajectory readers", () => {
   let agentsDir: string;
@@ -68,5 +68,84 @@ describe("trajectory readers", () => {
   it("extractSystemPromptChars returns undefined when there is nothing usable", () => {
     expect(extractSystemPromptChars(undefined)).toBeUndefined();
     expect(extractSystemPromptChars({ data: {} })).toBeUndefined();
+  });
+
+  describe("findAllRunTraces", () => {
+    it("returns [] for a missing trajectory file", async () => {
+      expect(await findAllRunTraces(agentsDir, "main", "nope")).toEqual([]);
+    });
+
+    it("extracts toolMetas and status per run, in file order", async () => {
+      await writeTrajectory("main", "sess-1", [
+        { type: "model.completed", runId: "run-1", provider: "deepseek", modelId: "deepseek-v4-pro" },
+        {
+          type: "trace.artifacts",
+          runId: "run-1",
+          ts: "2026-09-24T15:56:05.775Z",
+          data: {
+            finalStatus: "success",
+            aborted: false,
+            toolMetas: [
+              { toolName: "read", meta: "from ~/.openclaw/workspace/skills/aiops-incident/SKILL.md" },
+              { toolName: "sessions_spawn", meta: "task Incident: ..." },
+            ],
+          },
+        },
+        { type: "model.completed", runId: "run-2", provider: "deepseek", modelId: "deepseek-v4-pro" },
+        {
+          type: "trace.artifacts",
+          runId: "run-2",
+          ts: "2026-09-24T15:57:01.539Z",
+          data: { finalStatus: "success", toolMetas: [{ toolName: "subagents", meta: "" }] },
+        },
+      ]);
+
+      const traces = await findAllRunTraces(agentsDir, "main", "sess-1");
+      expect(traces).toHaveLength(2);
+      expect(traces[0]).toMatchObject({
+        runId: "run-1",
+        ts: "2026-09-24T15:56:05.775Z",
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        finalStatus: "success",
+        aborted: false,
+      });
+      expect(traces[0].toolMetas).toEqual([
+        { toolName: "read", meta: "from ~/.openclaw/workspace/skills/aiops-incident/SKILL.md" },
+        { toolName: "sessions_spawn", meta: "task Incident: ..." },
+      ]);
+      expect(traces[1].toolMetas).toEqual([{ toolName: "subagents", meta: "" }]);
+    });
+
+    it("falls back to the same-runId model.completed event for provider/model when trace.artifacts omits them", async () => {
+      await writeTrajectory("diag-k8s", "sess-2", [
+        { type: "model.completed", runId: "run-1", provider: "deepseek", modelId: "deepseek-v4-pro" },
+        { type: "trace.artifacts", runId: "run-1", ts: "2026-09-24T15:56:52.277Z", data: { toolMetas: [] } },
+      ]);
+      const [trace] = await findAllRunTraces(agentsDir, "diag-k8s", "sess-2");
+      expect(trace.provider).toBe("deepseek");
+      expect(trace.model).toBe("deepseek-v4-pro");
+    });
+
+    it("handles a run with no tool calls (empty toolMetas)", async () => {
+      await writeTrajectory("main", "sess-3", [
+        { type: "trace.artifacts", runId: "run-1", ts: "2026-09-24T15:56:05.775Z", data: { toolMetas: [] } },
+      ]);
+      const [trace] = await findAllRunTraces(agentsDir, "main", "sess-3");
+      expect(trace.toolMetas).toEqual([]);
+    });
+
+    it("skips malformed toolMetas entries instead of throwing", async () => {
+      await writeTrajectory("main", "sess-4", [
+        {
+          type: "trace.artifacts",
+          runId: "run-1",
+          ts: "2026-09-24T15:56:05.775Z",
+          data: { toolMetas: [{ toolName: "read", meta: "ok" }, { meta: "missing toolName" }, "not an object"] },
+        },
+      ]);
+      const [trace] = await findAllRunTraces(agentsDir, "main", "sess-4");
+      expect(trace.toolMetas).toEqual([{ toolName: "read", meta: "ok" }]);
+    });
   });
 });

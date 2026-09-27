@@ -24,7 +24,7 @@ async function readTrajectoryLines(path: string): Promise<Record<string, unknown
   return out;
 }
 
-function trajectoryPath(agentsDir: string, agentId: string, sessionId: string): string {
+export function trajectoryPath(agentsDir: string, agentId: string, sessionId: string): string {
   return join(agentsDir, agentId, "sessions", `${sessionId}.trajectory.jsonl`);
 }
 
@@ -63,6 +63,66 @@ export async function findContextCompiledNear(
     }
   }
   return undefined;
+}
+
+export type TrajectoryToolMeta = {
+  toolName: string;
+  meta: string;
+};
+
+export type TrajectoryRunTrace = {
+  runId: string;
+  ts: string;
+  provider?: string;
+  model?: string;
+  finalStatus?: string;
+  aborted?: boolean;
+  toolMetas: TrajectoryToolMeta[];
+};
+
+/** Enumerates every completed run's `trace.artifacts` event in a session's trajectory file, in
+ * file order (which is chronological - the writer is append-only). This is how `/probe
+ * explain` gets an already-ordered, already-human-readable, already-partially-redacted (by
+ * OpenClaw itself, e.g. `TOKEN=***`) summary of every tool call in a run, without needing any
+ * new capture hook or relying on `messagesSnapshot` (whose per-message timestamps have been
+ * observed stale on long sessions - see report.ts's `matchedInWindow` fallback). Provider/model
+ * come from the same-`runId` `model.completed` event when `trace.artifacts` itself doesn't
+ * carry them (defensive - not yet observed missing, but cheap to guard). */
+export async function findAllRunTraces(
+  agentsDir: string,
+  agentId: string,
+  sessionId: string,
+): Promise<TrajectoryRunTrace[]> {
+  const lines = await readTrajectoryLines(trajectoryPath(agentsDir, agentId, sessionId));
+  const modelByRunId = new Map<string, { provider?: string; model?: string }>();
+  for (const d of lines) {
+    if (d.type !== "model.completed" || typeof d.runId !== "string") continue;
+    modelByRunId.set(d.runId, {
+      provider: typeof d.provider === "string" ? d.provider : undefined,
+      model: typeof d.modelId === "string" ? d.modelId : undefined,
+    });
+  }
+
+  const traces: TrajectoryRunTrace[] = [];
+  for (const d of lines) {
+    if (d.type !== "trace.artifacts" || typeof d.runId !== "string" || typeof d.ts !== "string") continue;
+    const data = (d.data ?? {}) as Record<string, unknown>;
+    const rawToolMetas = Array.isArray(data.toolMetas) ? (data.toolMetas as Array<Record<string, unknown>>) : [];
+    const toolMetas: TrajectoryToolMeta[] = rawToolMetas
+      .filter((t) => typeof t.toolName === "string")
+      .map((t) => ({ toolName: t.toolName as string, meta: typeof t.meta === "string" ? t.meta : "" }));
+    const fromModel = modelByRunId.get(d.runId);
+    traces.push({
+      runId: d.runId,
+      ts: d.ts,
+      provider: (typeof d.provider === "string" ? d.provider : undefined) ?? fromModel?.provider,
+      model: (typeof d.modelId === "string" ? d.modelId : undefined) ?? fromModel?.model,
+      finalStatus: typeof data.finalStatus === "string" ? data.finalStatus : undefined,
+      aborted: typeof data.aborted === "boolean" ? data.aborted : undefined,
+      toolMetas,
+    });
+  }
+  return traces;
 }
 
 export function extractSystemPromptChars(contextCompiled: Record<string, unknown> | undefined): number | undefined {

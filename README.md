@@ -16,6 +16,12 @@ plugins, or any other plugin, being installed. Its core numeric metrics (time, t
 tool/skill usage, errors) come from OpenClaw's own audit ledger, trajectory files, and
 probe's own hook-based detection, and work regardless of what else is installed.
 
+It also answers a different question - *what did the agent actually do, in plain language?*
+- via `/probe explain [session]`: a natural-language, chronological HTML report of every tool
+call in a session (and any sub-agents it spawned), correctly attributed per agent, with the
+original command available behind a collapsed `<details>` for each one. See
+[Explaining a session](#explaining-a-session-in-natural-language).
+
 ## Install
 
 ```bash
@@ -125,6 +131,35 @@ None of the optional items above affect whether `/probe` runs or whether the cor
 specific field is populated or falls back to `null`/`0`/an empty object, always with a
 matching note in the report's `warnings` array.
 
+### Optional - `/probe explain` (natural-language session reports)
+
+Unlike everything else in this table, `/probe explain` needs no config at all to work with a
+sensible default: it calls `api.runtime.llm.complete` with no explicit `model`, which falls
+back to the target agent's own configured model - zero extra setup.
+
+| Setting | Needed because | Symptom if missing/wrong |
+| --- | --- | --- |
+| `plugins.entries.probe.llm.allowModelOverride: true` | Only required if you also set `plugins.entries.probe.config.explain.model` to point explanations at a different (e.g. cheaper/faster) model than the target agent's own. OpenClaw gates model overrides from any plugin behind this explicit opt-in. | Without the flag, an explicit `explain.model` is silently ignored and the target agent's own model is used instead - not an error, just not what you asked for. |
+
+```json5
+{
+  "plugins": {
+    "entries": {
+      "probe": {
+        "llm": { "allowModelOverride": true },
+        "config": { "explain": { "model": "openai/gpt-5-mini" } }
+      }
+    }
+  }
+}
+```
+
+Delivering the generated HTML as a file attachment (not just a path in the text reply) needs
+nothing from you - it works automatically as long as `/tmp/openclaw` (or its per-user
+`os.tmpdir()` fallback) is writable, which is true on any normal OpenClaw install. If it
+somehow isn't, `/probe explain` degrades to a text-only reply with the report's saved path
+instead of failing the command - see [Explaining a session](#explaining-a-session-in-natural-language).
+
 ## Commands
 
 | Command | Description |
@@ -138,17 +173,20 @@ matching note in the report's `warnings` array.
 | `/probe delete <name>` | Delete a saved measurement (its report and raw-request archive, if any). Fails if the name doesn't exist. |
 | `/probe diff <name1>, <name2>` | Compare two saved measurements field by field, save the result, and print it as JSON. See [Diffing two measurements](#diffing-two-measurements). |
 | `/probe diff verbose <name1>, <name2>` | Same comparison, printed as an annotated, human-readable text report instead of JSON. |
+| `/probe explain [session]` | Explain a **session** (not a saved measurement) in natural language as an HTML report, attached to the reply. Omit `[session]` to explain the session you're chatting in. See [Explaining a session](#explaining-a-session-in-natural-language). |
+| `/probe explain refresh [session]` | Same, but regenerates even if a cached report already exists (costs a new LLM call). |
 | `/probe` (no args) | Print this command summary. |
 
 Only **one** `start`ed measurement can be active at a time - `/probe start` while one is
 already running is rejected, and you must `/probe stop` (or let it finish) before starting
 another.
 
-A probe name cannot be exactly `start`, `stop`, `verbose`, `list`, `delete`, or `diff`
-(reserved words), and cannot be two ISO 8601 timestamps separated by whitespace (that parses
-as a range request instead). Names may contain spaces, e.g.
+A probe name cannot be exactly `start`, `stop`, `verbose`, `list`, `delete`, `diff`, or
+`explain` (reserved words), and cannot be two ISO 8601 timestamps separated by whitespace
+(that parses as a range request instead). Names may contain spaces, e.g.
 `/probe start baseline before cache change`. The same rules apply to the optional trailing
-name on `/probe <start> <end> [name]`.
+name on `/probe <start> <end> [name]`. (`/probe explain` is addressed by session id/key, not
+by name, and is exempt from this - see below.)
 
 Naming a range measurement is recommended - the auto-generated `"<start> .. <end>"` name
 works but is unwieldy to type back exactly (it must match character-for-character, aside
@@ -172,6 +210,11 @@ from case) when you later want `/probe <name>` or `/probe verbose <name>`.
 
 /probe diff baseline, incident-postmortem
 /probe diff verbose baseline, incident-postmortem
+
+/probe explain
+/probe explain 94ad7f59-d54a-4b63-9e4c-9b5eb241ed20
+/probe explain agent:main:hook:alertmanager:x
+/probe explain refresh 94ad7f59-d54a-4b63-9e4c-9b5eb241ed20
 ```
 
 ### Error messages
@@ -182,6 +225,8 @@ silent wrong answer:
 - Starting a measurement while one is already active.
 - Stopping when no measurement is active.
 - Showing (JSON or verbose), deleting, or diffing a measurement name that does not exist.
+- `/probe explain` given a session id/key that matches no known session, or a bare `/probe explain`
+  when the invoking session can't be resolved either.
 - Diffing a measurement whose saved file is corrupt (not valid JSON) or missing fields a
   report must have (hand-edited, or from an incompatible probe version).
 - A time range where the start is not strictly before the end.
@@ -300,6 +345,76 @@ name2, diff }`, `DiffSet` = `{ added, removed }`).
   "warnings": { "added": [], "removed": [] }
 }
 ```
+
+## Explaining a session in natural language
+
+`/probe explain [session]` answers a different question than everything else in this plugin:
+not "how much did this cost," but "what did the agent actually *do*, in plain language?" Given
+a session - a UUID session id, a full session key (e.g.
+`agent:main:hook:alertmanager:...`), or nothing (explains the session you're chatting in) - it
+walks every sub-agent session spawned from it, reads each one's own trajectory file, and calls
+an LLM to turn the raw tool-call sequence into a chronological narrative: one summary sentence
+per agent turn, one short explanation per tool call, correctly attributed to whichever agent
+(main or a sub-agent) actually did it. The result is a self-contained HTML report - one
+`<details>` per tool call, collapsed by default, expand it to see the original (OpenClaw's own
+truncated/redacted) command - saved to disk and attached to the command's reply.
+
+This is **unlike every other `/probe` command** in two ways worth knowing up front:
+
+- It's addressed by **session**, not by a saved measurement name - there's nothing to
+  `/probe start`/`stop` first. It reads each involved session's trajectory file directly, so
+  (unlike `/probe <start> <end>`, which is bounded by the audit ledger's 30-day retention) it
+  works on any session whose trajectory file is still on disk, however old, retroactively -
+  including sessions from before this plugin version was installed.
+- It calls an LLM (`api.runtime.llm.complete`) and costs real money and time - typically a few
+  cents and a handful of seconds for a multi-agent incident, shown in both the reply and the
+  report itself. Nothing else in `/probe` calls a model.
+
+### Finding sub-agent sessions
+
+Sub-agent sessions are discovered by walking `spawnedBy` in each agent's own session store
+(`agents/<agentId>/sessions/sessions.json`) - the *parent's own session key*, written by the
+host for every sub-agent run, not something this plugin infers from timing or task-description
+text. Every configured agent id (`main` plus everything in `agents.list[]`) is searched, since
+a sub-agent's session lives under **its own** agentId's store, not the parent's. There is no
+depth limit tied to your `agents.defaults.subagents.maxSpawnDepth` config - the walk follows
+`spawnedBy` chains as deep as they actually go.
+
+### What gets explained, and what doesn't
+
+Only **tool calls** are explained, one summary per agent turn ("run") plus one sentence per
+tool call inside it - not individual LLM "thinking" steps, and not tool call *results* (the
+underlying `trace.artifacts.toolMetas` data OpenClaw itself records is a truncated,
+already-partially-redacted one-line **command** summary per call, not its output). Base your
+expectations accordingly: explanations describe what a command was *for*, inferred from the
+tool name and command text, not what it *found* - "Checks the status of the order deployment,"
+not "finds the order deployment is healthy."
+
+### Caching, cost, and language
+
+The generated report is cached to disk (named after the *slugified root session key*, not a
+measurement name) - re-running `/probe explain` for the same session just re-serves the cached
+file, no new LLM call. Use `/probe explain refresh [session]` to force regeneration.
+
+`config.explain.language` (default `"en"`) controls the natural language of the generated
+text - set it to `"ru"`, `"ja"`, or free text describing what you want. `config.explain.model`
+lets you point explanations at a specific (e.g. cheaper/faster) model instead of the target
+agent's own - see [Requirements](#optional---probe-explain-natural-language-session-reports)
+for the operator opt-in this needs.
+
+Tool-call command text is redacted (a defense-in-depth pass distinct from and in addition to
+whatever OpenClaw's own trajectory writer already masked) before it's sent to the LLM or
+written into the HTML report - `TOKEN=`/`SECRET=`/`PASSWORD=`-shaped assignments,
+`Authorization: Bearer` values, and bare API-key-shaped tokens (`sk-...`, `ghp_...`, JWTs) are
+replaced with `[REDACTED]`.
+
+### Delivery
+
+The HTML report is attached to the command's reply via a structured `mediaUrl` (not raw text) -
+it lands wherever you ran the command, Telegram included, the same as any other file OpenClaw
+sends you. A saved, human-readable path is always in the reply text too, in case attachment
+delivery isn't possible on your setup - see
+[Requirements](#optional---probe-explain-natural-language-session-reports).
 
 ## The report
 
@@ -498,6 +613,9 @@ report could read it.
 | Memory search usage | This plugin's own `after_tool_call` hook handler, watching for `memory_search`/`memory_get` calls and reading the result's parsed `results`/`text` fields for hit count and character count. Classified `active_memory` vs `explicit` by the call's `sessionKey`/`sessionId` (Active Memory's blocking-recall sub-agent runs under a synthetic `active-memory-<...>` session id and a `sessionKey` with a `:active-memory:<hash>` suffix - confirmed via `openclaw audit --json`, not documented as public API, see [CLAUDE.md](CLAUDE.md)). Written to `<base>/logs/probe/memory-search/<date>.jsonl`, filtered by timestamp. |
 | Tool -> plugin ownership | `openclaw plugins list --json`, each plugin's manifest-declared `contracts.tools` (no plugin runtimes are loaded to compute this, so it stays fast regardless of how many plugins are installed). |
 | Raw LLM request/response archive | This plugin's own `llm_input`/`llm_output` hook handlers, written to `<base>/logs/probe/llm-api/<date>.jsonl` - independent of the `llm-api-logger` plugin. |
+| `/probe explain`'s tool-call list | Each involved session's own trajectory file directly - `trace.artifacts` events' `toolMetas` array, one per completed run (not `messagesSnapshot`; see [CLAUDE.md](CLAUDE.md) for why). No new capture hook - reads the same trajectory file `tokens`/`models_used`/etc already read, just a different event within it. |
+| `/probe explain`'s sub-agent discovery | `api.runtime.agent.session.listSessionEntries({ agentId })` for every configured agent id, following each entry's `spawnedBy` field (the parent's own session key) breadth-first. Not documented as a narrow public type; see [CLAUDE.md](CLAUDE.md). |
+| `/probe explain`'s natural-language text | `api.runtime.llm.complete` (see [docs/plugins/sdk-runtime.md](https://docs.openclaw.ai/plugins/sdk-runtime)) - a host-owned completion call, not a sub-agent spawn. |
 
 `<base>` is the OpenClaw base directory (normally `~/.openclaw`, or wherever
 `--profile`/`--dev`/`OPENCLAW_STATE_DIR` point it).
@@ -532,6 +650,11 @@ All fields are optional; defaults shown.
             "maxFileSizeMb": 20,       // rotate the day's raw log file past this size
             "maxFiles": 14,            // rotated files to keep before deleting the oldest
             "redactSecrets": true      // redact secret-shaped strings/keys before writing to disk
+          },
+          "explain": {
+            "model": null,             // "provider/model" override for /probe explain (needs llm.allowModelOverride, see above); unset = target agent's own model
+            "modelFallback": null,     // used only if `model` is set but can't be resolved
+            "language": "en"           // natural language for generated explanations, e.g. "ru"
           }
         }
       }
@@ -550,13 +673,16 @@ npm run plugin:install   # build + `openclaw plugins install . --force`
 ```
 
 Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts`
-(trajectory-file readers), `src/llmCapture.ts` (hook-based raw LLM log capture),
-`src/skillUsage.ts` (hook-based skill-use detection and its own log capture/collection),
-`src/memorySearchUsage.ts` (hook-based memory_search/memory_get detection, active_memory vs
-explicit classification, and its own log capture/collection), `src/report.ts` (aggregation),
-`src/diff.ts` (comparing two reports into a `ProbeDiffReport`), `src/commands.ts` (`/probe`
-argument parsing and dispatch), `src/format.ts` (verbose report/diff rendering), `src/index.ts`
-(plugin registration).
+(trajectory-file readers, including `findAllRunTraces` for `/probe explain`),
+`src/llmCapture.ts` (hook-based raw LLM log capture), `src/skillUsage.ts` (hook-based
+skill-use detection and its own log capture/collection), `src/memorySearchUsage.ts`
+(hook-based memory_search/memory_get detection, active_memory vs explicit classification, and
+its own log capture/collection), `src/report.ts` (aggregation), `src/diff.ts` (comparing two
+reports into a `ProbeDiffReport`), `src/sessionGraph.ts` (`/probe explain`'s session/sub-agent
+discovery via `spawnedBy`), `src/explainLlm.ts` (`/probe explain`'s LLM batching/prompting),
+`src/explainHtml.ts` (`/probe explain`'s HTML rendering), `src/commands.ts` (`/probe` argument
+parsing and dispatch), `src/format.ts` (verbose report/diff rendering), `src/index.ts` (plugin
+registration).
 
 ## License
 

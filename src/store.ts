@@ -41,6 +41,62 @@ export function memorySearchResultsPath(paths: ProbePaths, slug: string): string
   return join(paths.probeResultsDir, `${slug}.memory-search.jsonl`);
 }
 
+/** Path of a `/probe explain` report, named by the slugified root sessionKey (not a measurement
+ * slug - explain operates on a session, not a saved measurement, see commands.ts). */
+export function explainResultPath(paths: ProbePaths, slug: string): string {
+  return join(paths.probeResultsDir, `${slug}.explain.html`);
+}
+
+export async function writeExplainResult(paths: ProbePaths, slug: string, html: string): Promise<string> {
+  await mkdir(paths.probeResultsDir, { recursive: true });
+  const path = explainResultPath(paths, slug);
+  await writeFile(path, html, "utf-8");
+  return path;
+}
+
+export async function readExplainResult(paths: ProbePaths, slug: string): Promise<string | null> {
+  try {
+    return await readFile(explainResultPath(paths, slug), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/** OpenClaw's own preferred shared temp root - confirmed by reading the host's compiled
+ * source (`POSIX_OPENCLAW_TMP_DIR` in its `tmp-openclaw-dir` module), not part of any
+ * exported plugin API. A command reply's `mediaUrl` is only accepted for a local `text/html`
+ * file when the file's real path resolves inside this directory - live-confirmed: pointing
+ * `mediaUrl` at the durable copy in `probeResultsDir` instead was rejected with
+ * `LocalMediaAccessError: "hostReadCapability permits only validated plain-text documents and
+ * trusted generated HTML reports for local reads"`. This constant could change in a future
+ * OpenClaw release; if it does, `writeExplainMediaCopy` below just fails closed (returns
+ * null) and `/probe explain` degrades to a text-only reply instead of crashing - see its
+ * try/catch and commands.ts's handling of a null return. */
+const OPENCLAW_TRUSTED_TMP_DIR = "/tmp/openclaw";
+
+/** Writes a second, disposable copy of an already-generated explain report into OpenClaw's
+ * own trusted temp directory (see `OPENCLAW_TRUSTED_TMP_DIR`) purely so a command reply's
+ * `mediaUrl` is accepted as a real file attachment - the durable copy stays in
+ * `probeResultsDir` via `writeExplainResult`, this one is safe to lose on reboot/cleanup.
+ * Returns null on any failure (permissions, disk, host changed the trusted path, ...) so
+ * callers can fall back to a text-only reply instead of throwing. */
+export async function writeExplainMediaCopy(
+  slug: string,
+  html: string,
+  trustedTmpDir: string = OPENCLAW_TRUSTED_TMP_DIR,
+): Promise<string | null> {
+  try {
+    const dir = join(trustedTmpDir, "probe-explain");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `${slug}.explain.html`);
+    await writeFile(path, html, "utf-8");
+    return path;
+  } catch {
+    return null;
+  }
+}
+
 export async function readResult(paths: ProbePaths, slug: string): Promise<ProbeReport | null> {
   try {
     const text = await readFile(resultPath(paths, slug), "utf-8");

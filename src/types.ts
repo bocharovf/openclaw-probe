@@ -23,6 +23,17 @@ export type ProbeConfig = {
     maxFiles: number;
     redactSecrets: boolean;
   };
+  explain: {
+    /** Model ref ("provider/model") for /probe explain's natural-language interpretation.
+     * Unset uses api.runtime.llm.complete's default (the target agent's configured model) -
+     * an explicit value here requires the operator to grant
+     * plugins.entries.probe.llm.allowModelOverride: true (see README Requirements). */
+    model?: string;
+    modelFallback?: string;
+    /** Natural language for the generated explanations, e.g. "en", "ru". Free text passed
+     * into the LLM prompt, not validated against a fixed list. */
+    language: string;
+  };
 };
 
 export const DEFAULT_CONFIG: ProbeConfig = {
@@ -33,6 +44,9 @@ export const DEFAULT_CONFIG: ProbeConfig = {
     maxFileSizeMb: 20,
     maxFiles: 14,
     redactSecrets: true,
+  },
+  explain: {
+    language: "en",
   },
 };
 
@@ -241,4 +255,125 @@ export type ProbeDiffReport = {
   };
   events: DiffSet;
   warnings: DiffSet;
+};
+
+// ---- /probe explain ----
+
+/** One tool call as OpenClaw's own trajectory writer already summarized it (see
+ * `trajectory.ts`'s `findAllRunTraces`) - `meta` is a truncated, partially host-redacted
+ * (e.g. `TOKEN=***`) one-line description, not the full raw arguments. */
+export type SessionToolCallTrace = {
+  toolName: string;
+  meta: string;
+};
+
+/** One completed agent turn ("run") pulled from a session's trajectory file. */
+export type SessionRunTrace = {
+  agentId: string;
+  sessionId: string;
+  sessionKey: string;
+  runId: string;
+  ts: string;
+  provider?: string;
+  model?: string;
+  finalStatus?: string;
+  aborted?: boolean;
+  toolCalls: SessionToolCallTrace[];
+};
+
+/** One session in the explain graph (the root session, or a sub-agent session discovered by
+ * walking `spawnedBy` chains) - see `sessionGraph.ts`. */
+export type SessionNode = {
+  agentId: string;
+  sessionId: string;
+  sessionKey: string;
+  spawnedBy?: string;
+  costUsd?: number;
+  tokens?: { input?: number; output?: number; total?: number };
+  runs: SessionRunTrace[];
+};
+
+export type ExplainedToolCall = SessionToolCallTrace & {
+  explanation: string;
+};
+
+export type ExplainedRun = Omit<SessionRunTrace, "toolCalls"> & {
+  summary: string;
+  toolCalls: ExplainedToolCall[];
+};
+
+export type AgentIdentity = {
+  name?: string;
+  emoji?: string;
+};
+
+export type ExplainUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+};
+
+export type ExplainResult = {
+  rootSessionKey: string;
+  sessionsIncluded: number;
+  runs: ExplainedRun[];
+  agentIdentities: Record<string, AgentIdentity>;
+  usage: ExplainUsage;
+  warnings: string[];
+};
+
+/** Loose shape of a `sessions.json` entry (see `api.runtime.agent.session.listSessionEntries`)
+ * - only the fields `sessionGraph.ts` actually reads are named; the host does not export a
+ * narrow public type for this. */
+export type SessionStoreEntryLike = {
+  sessionId?: string;
+  spawnedBy?: string;
+  estimatedCostUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  [key: string]: unknown;
+};
+
+export type LlmCompleteMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export type LlmCompleteResult = {
+  text: string;
+  provider: string;
+  model: string;
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    costUsd?: number;
+  };
+};
+
+/** Narrow structural view of `api.runtime` for the two host capabilities /probe explain uses
+ * (`docs/plugins/sdk-runtime.md`'s `api.runtime.agent.session` and `api.runtime.llm`) - kept
+ * loose/local rather than importing OpenClaw's internal types, matching this file's existing
+ * convention for host-shaped data. */
+export type ExplainRuntimeApi = {
+  runtime: {
+    agent: {
+      session: {
+        listSessionEntries: (params: { agentId: string }) => Iterable<{ sessionKey: string; entry: SessionStoreEntryLike }>;
+      };
+    };
+    llm: {
+      complete: (params: {
+        messages: LlmCompleteMessage[];
+        model?: string;
+        maxTokens?: number;
+        temperature?: number;
+        systemPrompt?: string;
+        purpose?: string;
+        signal?: AbortSignal;
+      }) => Promise<LlmCompleteResult>;
+    };
+  };
 };
