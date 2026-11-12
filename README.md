@@ -13,7 +13,7 @@ bracketing it, make your change, run it again, and compare the two reports with
 Probe is self-contained: it captures its own LLM request/response data and detects its own
 skill usage via hooks, and does **not** depend on the `llm-api-logger` or `skill-usage`
 plugins, or any other plugin, being installed. Its core numeric metrics (time, tokens,
-tool/skill usage, errors) come from OpenClaw's own audit ledger, trajectory files, and
+tool/skill usage, errors) come from OpenClaw's own audit ledger, trajectory database, and
 probe's own hook-based detection, and work regardless of what else is installed.
 
 It also answers a different question - *what did the agent actually do, in plain language?*
@@ -39,7 +39,7 @@ openclaw plugins install . --force
 ## Requirements
 
 Probe reads from several OpenClaw subsystems (chat commands, the audit ledger, trajectory
-files, its own hooks). Each has its own config gate. This section lists what has to be true
+events, its own hooks). Each has its own config gate. This section lists what has to be true
 on the host for `/probe` to work at all, and separately, what the one genuinely *optional*
 piece of the report additionally needs - so a report that is missing a field is easy to
 diagnose instead of looking like a bug.
@@ -60,7 +60,7 @@ diagnose instead of looking like a bug.
 | --- | --- | --- |
 | `audit.enabled` is not `false` (default `true`) | `time`, `iterations`, `errors`, `sessions`, and `tools_used` all come from the audit ledger - there is no other source for them. | Every report has zeroed-out `time`/`iterations`/`errors`, empty `sessions`/`tools_used`, and `/probe <start> <end>` for that window fails with the "No data found" error (see [Error messages](#error-messages)). `/probe start`/`stop` still "succeeds" but the report is empty. |
 | The probed window is inside the audit ledger's retention (**30 days / 100,000 rows**, not configurable) | Older records are pruned; there's nothing to read. | Same "No data found" error for `/probe <start> <end>` on an old range. Always use `/probe start`/`stop` for anything you want reliably measured, and treat `/probe <start> <end>` as best-effort for anything more than a few days old. |
-| Trajectory sidecar files for the involved runs still exist on disk (written automatically, no on/off switch - but `session.maintenance` can prune old ones as part of its retention/disk-budget cleanup) | `tokens`, `models_used`, `context`, and `llm_calls`/`tool_calling_rounds` come from each run's `<agent>/sessions/<session>.trajectory.jsonl`. | Those fields undercount or stay at `0` for the affected runs, and the report's `warnings` array names the run id it couldn't find a trajectory for. `time`/`iterations`/`errors`/`tools_used` are unaffected (audit-ledger-only). |
+| Trajectory events for the involved runs are still retained in the per-agent trajectory database (written automatically, no on/off switch - but session maintenance/retention can prune old ones) | `tokens`, `models_used`, `context`, and `llm_calls`/`tool_calling_rounds` come from each run's trajectory events (`model.completed` / `context.compiled`), read from `<base>/agents/<agentId>/agent/openclaw-agent.sqlite` (table `trajectory_runtime_events`). | Those fields undercount or stay at `0` for the affected runs, and the report's `warnings` array names the run id it couldn't find a trajectory for. `time`/`iterations`/`errors`/`tools_used` are unaffected (audit-ledger-only). |
 
 `llm_calls`/`models_used` normally come from a run's `model.completed` trajectory event's
 `messagesSnapshot`, matched to the run by timestamp. If that snapshot's timestamps don't fall
@@ -352,7 +352,7 @@ name2, diff }`, `DiffSet` = `{ added, removed }`).
 not "how much did this cost," but "what did the agent actually *do*, in plain language?" Given
 a session - a UUID session id, a full session key (e.g.
 `agent:main:hook:alertmanager:...`), or nothing (explains the session you're chatting in) - it
-walks every sub-agent session spawned from it, reads each one's own trajectory file, and calls
+walks every sub-agent session spawned from it, reads each one's own trajectory events, and calls
 an LLM to turn the raw tool-call sequence into a chronological narrative: one summary sentence
 per agent turn, one short explanation per tool call, correctly attributed to whichever agent
 (main or a sub-agent) actually did it. The result is a self-contained HTML report - one
@@ -362,9 +362,9 @@ truncated/redacted) command - saved to disk and attached to the command's reply.
 This is **unlike every other `/probe` command** in two ways worth knowing up front:
 
 - It's addressed by **session**, not by a saved measurement name - there's nothing to
-  `/probe start`/`stop` first. It reads each involved session's trajectory file directly, so
+  `/probe start`/`stop` first. It reads each involved session's trajectory events directly, so
   (unlike `/probe <start> <end>`, which is bounded by the audit ledger's 30-day retention) it
-  works on any session whose trajectory file is still on disk, however old, retroactively -
+  works on any session whose trajectory is still retained, however old, retroactively -
   including sessions from before this plugin version was installed.
 - It calls an LLM (`api.runtime.llm.complete`) and costs real money and time - typically a few
   cents and a handful of seconds for a multi-agent incident, shown in both the reply and the
@@ -527,7 +527,7 @@ timestamps or the explicit range you gave). Not derived from any log.
 **`iterations`**
 - `agent_runs` - completed top-level agent turns (audit ledger).
 - `llm_calls` - individual model completions across all runs, including mid-run
-  tool-calling steps (from each run's trajectory file).
+  tool-calling steps (from each run's trajectory events).
 - `tool_calling_rounds` - of those LLM calls, how many produced at least one tool call.
 - `tool_calls_total` - individual tool invocations (audit ledger; a "round" can contain
   several parallel tool calls).
@@ -600,7 +600,7 @@ entries never include call arguments or results (the audit ledger that backs the
 metadata-only by design - see [Data sources](#data-sources)), only the tool name, outcome,
 and duration.
 
-**`warnings`** - non-fatal notes, e.g. a run's trajectory file was rotated/deleted before the
+**`warnings`** - non-fatal notes, e.g. a run's trajectory events were pruned before the
 report could read it.
 
 ## Data sources
@@ -608,12 +608,12 @@ report could read it.
 | Data | Source |
 | --- | --- |
 | Time, agent/tool run pairing, errors, tool names, session/agent ids | `openclaw audit --json --after <ms> --before <ms>` (paginated). Metadata-only, 30-day / 100,000-row retention - see [Audit records](https://docs.openclaw.ai/cli/audit). |
-| Tokens, LLM call count, tool-calling rounds, models used, context size | Each involved run's trajectory file: `<base>/agents/<agentId>/sessions/<sessionId>.trajectory.jsonl` (`model.completed` and `context.compiled` events). |
+| Tokens, LLM call count, tool-calling rounds, models used, context size | Each involved run's trajectory events (`model.completed` and `context.compiled`), read from the per-agent trajectory database `<base>/agents/<agentId>/agent/openclaw-agent.sqlite` (table `trajectory_runtime_events`). |
 | Skill usage | This plugin's own `after_tool_call` hook handler, watching for a read-family tool call whose target file's basename is `SKILL.md` and recovering the skill's declared name from the file content's YAML frontmatter (falling back to the containing directory's name). Written to `<base>/logs/probe/skill-usage/<date>.jsonl`, filtered by timestamp - independent of the `skill-usage` plugin. Skills are not invoked through a dedicated tool call in OpenClaw; reading their `SKILL.md` *is* how a skill gets used (see [docs/tools/skills.md](https://docs.openclaw.ai/tools/skills)). |
 | Memory search usage | This plugin's own `after_tool_call` hook handler, watching for `memory_search`/`memory_get` calls and reading the result's parsed `results`/`text` fields for hit count and character count. Classified `active_memory` vs `explicit` by the call's `sessionKey`/`sessionId` (Active Memory's blocking-recall sub-agent runs under a synthetic `active-memory-<...>` session id and a `sessionKey` with a `:active-memory:<hash>` suffix - confirmed via `openclaw audit --json`, not documented as public API, see [CLAUDE.md](CLAUDE.md)). Written to `<base>/logs/probe/memory-search/<date>.jsonl`, filtered by timestamp. |
 | Tool -> plugin ownership | `openclaw plugins list --json`, each plugin's manifest-declared `contracts.tools` (no plugin runtimes are loaded to compute this, so it stays fast regardless of how many plugins are installed). |
 | Raw LLM request/response archive | This plugin's own `llm_input`/`llm_output` hook handlers, written to `<base>/logs/probe/llm-api/<date>.jsonl` - independent of the `llm-api-logger` plugin. |
-| `/probe explain`'s tool-call list | Each involved session's own trajectory file directly - `trace.artifacts` events' `toolMetas` array, one per completed run (not `messagesSnapshot`; see [CLAUDE.md](CLAUDE.md) for why). No new capture hook - reads the same trajectory file `tokens`/`models_used`/etc already read, just a different event within it. |
+| `/probe explain`'s tool-call list | Each involved session's own trajectory events directly - `trace.artifacts` events' `toolMetas` array, one per completed run (not `messagesSnapshot`; see [CLAUDE.md](CLAUDE.md) for why). No new capture hook - reads the same trajectory database `tokens`/`models_used`/etc already read, just a different event within it. |
 | `/probe explain`'s sub-agent discovery | `api.runtime.agent.session.listSessionEntries({ agentId })` for every configured agent id, following each entry's `spawnedBy` field (the parent's own session key) breadth-first. Not documented as a narrow public type; see [CLAUDE.md](CLAUDE.md). |
 | `/probe explain`'s natural-language text | `api.runtime.llm.complete` (see [docs/plugins/sdk-runtime.md](https://docs.openclaw.ai/plugins/sdk-runtime)) - a host-owned completion call, not a sub-agent spawn. |
 
@@ -673,7 +673,7 @@ npm run plugin:install   # build + `openclaw plugins install . --force`
 ```
 
 Source layout: `src/cli.ts` (subprocess calls to `openclaw`), `src/trajectory.ts`
-(trajectory-file readers, including `findAllRunTraces` for `/probe explain`),
+(trajectory-event readers from the per-agent SQLite database, including `findAllRunTraces` for `/probe explain`),
 `src/llmCapture.ts` (hook-based raw LLM log capture), `src/skillUsage.ts` (hook-based
 skill-use detection and its own log capture/collection), `src/memorySearchUsage.ts`
 (hook-based memory_search/memory_get detection, active_memory vs explicit classification, and
