@@ -94,7 +94,22 @@ describe("generateExplanations", () => {
 
     const callArgs = complete.mock.calls[0][0];
     expect(callArgs.model).toBe("openai/gpt-5.5");
-    expect(callArgs.systemPrompt).toContain("ru");
+    expect(callArgs.systemPrompt).toContain("Russian");
+    expect(callArgs.systemPrompt).not.toContain("in ru");
+  });
+
+  it("passes free-text language descriptions through verbatim", async () => {
+    const runs = [run("run-1", "main", [])];
+    const complete = vi.fn().mockResolvedValue({
+      text: JSON.stringify({ runs: [{ runId: "run-1", summary: "x", toolCalls: [] }] }),
+      provider: "p",
+      model: "m",
+      usage: {},
+    });
+
+    await generateExplanations(fakeApi(complete), runs, {}, { language: "simple Russian, no jargon" }, logger);
+
+    expect(complete.mock.calls[0][0].systemPrompt).toContain("simple Russian, no jargon");
   });
 
   it("scales maxTokens with the chunk's tool-call count instead of using one flat budget", async () => {

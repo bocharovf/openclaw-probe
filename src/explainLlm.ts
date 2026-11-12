@@ -80,12 +80,49 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+/** Maps common language codes/names to a full language name, so a short config value like
+ * `"ru"` still produces an unambiguous instruction for the model (the old `in ${language}`
+ * wording made "in ru" a weak signal the model ignored). Free-text values pass through
+ * unchanged, e.g. "simple Russian, no jargon". */
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: "English",
+  english: "English",
+  ru: "Russian",
+  russian: "Russian",
+  русский: "Russian",
+  uk: "Ukrainian",
+  ukrainian: "Ukrainian",
+  ja: "Japanese",
+  japanese: "Japanese",
+  de: "German",
+  german: "German",
+  fr: "French",
+  french: "French",
+  es: "Spanish",
+  spanish: "Spanish",
+  pt: "Portuguese",
+  portuguese: "Portuguese",
+  it: "Italian",
+  italian: "Italian",
+  zh: "Chinese",
+  chinese: "Chinese",
+};
+
+function languageName(language: string): string {
+  const key = language.trim().toLowerCase();
+  return LANGUAGE_NAMES[key] ?? language.trim();
+}
+
 function buildSystemPrompt(language: string): string {
+  const lang = languageName(language);
   return [
-    `You explain OpenClaw agent session logs to a human operator reviewing what happened, in ${language}.`,
+    "You explain OpenClaw agent session logs to a human operator reviewing what happened.",
+    "",
+    `Language: write every run summary and every tool-call explanation in ${lang}, and respond in ${lang}. Do not translate tool names or command text - only the summary and explanation prose must be in ${lang}.`,
+    "",
     "Input is a JSON array of \"runs\" (agent turns), each with an agent id/name, a timestamp, and an ordered list of tool calls (name + a truncated command/argument summary).",
     "For each run, write one short, concrete sentence summarizing what that turn accomplished - state what happened, not vague filler.",
-    "For each tool call inside a run, write one short sentence explaining what it does in plain language, e.g. a `read` of `skills/howto.md` becomes something like \"Reads the howto skill file\", an `exec` running kubectl commands becomes something like \"Checks the status of the order deployment\".",
+    "For each tool call inside a run, write one short sentence explaining what it does in plain language.",
     "Base explanations only on the tool name and command/argument text given - never invent outcomes, numbers, or results that are not shown.",
     "Respond with JSON only, no prose outside the JSON, matching exactly this shape:",
     '{"runs":[{"runId":"<echo the given runId>","summary":"<one sentence>","toolCalls":[{"index":<0-based index into that run\'s toolCalls array>,"explanation":"<one sentence>"}]}]}',
