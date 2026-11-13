@@ -43,12 +43,23 @@ async function collectAllSessions(api: ExplainRuntimeApi, agentIds: string[]): P
   return out;
 }
 
-/** Every agent id worth searching for sessions: the implicit `main` agent plus every id under
- * `agents.list[]`. Config shape is read loosely (see types.ts's `SessionStoreEntryLike` doc
- * comment for why) - OpenClaw does not export a narrow public config type to plugins. */
+/** Every agent id worth searching for sessions: the implicit `main` agent plus every configured
+ * agent id. OpenClaw 2026.10.10 stores configured agents in `agents.entries` (an object keyed
+ * by agent id); older hosts use `agents.list[]` with an `id` field on each entry. Both shapes
+ * are read loosely (see types.ts's `SessionStoreEntryLike` doc comment for why) - OpenClaw
+ * does not export a narrow public config type to plugins. */
 export function resolveConfiguredAgentIds(config: unknown): string[] {
-  const list = (config as { agents?: { list?: Array<{ id?: unknown }> } } | undefined)?.agents?.list;
+  const agents = (
+    config as { agents?: { list?: Array<{ id?: unknown }>; entries?: Record<string, unknown> } } | undefined
+  )?.agents;
   const ids = new Set<string>(["main"]);
+  const entries = agents?.entries;
+  if (entries && typeof entries === "object") {
+    for (const id of Object.keys(entries)) {
+      if (id) ids.add(id);
+    }
+  }
+  const list = agents?.list;
   if (Array.isArray(list)) {
     for (const a of list) {
       if (typeof a?.id === "string" && a.id) ids.add(a.id);
@@ -58,13 +69,29 @@ export function resolveConfiguredAgentIds(config: unknown): string[] {
 }
 
 /** Best-effort display identity (name/emoji) for an agent id, read from
- * `agents.list[].identity` (or `agents.defaults.identity` for `main`, which is usually not
- * itself listed in `agents.list[]`). Returns `{}` rather than throwing when nothing is found -
- * callers fall back to the bare agent id, this is cosmetic only. */
+ * `agents.entries[id].identity` (OpenClaw 2026.10.10+), `agents.list[].identity`
+ * (older hosts), or `agents.defaults.identity` for `main` (which is usually not itself listed
+ * as a configured entry). Returns `{}` rather than throwing when nothing is found - callers
+ * fall back to the bare agent id, this is cosmetic only. */
 export function resolveAgentIdentity(config: unknown, agentId: string): AgentIdentity {
-  const list = (
-    config as { agents?: { list?: Array<{ id?: unknown; identity?: { name?: unknown; emoji?: unknown } }> } } | undefined
-  )?.agents?.list;
+  const agents = (
+    config as {
+      agents?: {
+        list?: Array<{ id?: unknown; identity?: { name?: unknown; emoji?: unknown } }>;
+        entries?: Record<string, { identity?: { name?: unknown; emoji?: unknown } }>;
+      };
+    } | undefined
+  )?.agents;
+
+  const entryIdentity = agents?.entries?.[agentId]?.identity;
+  if (entryIdentity) {
+    return {
+      name: typeof entryIdentity.name === "string" ? entryIdentity.name : undefined,
+      emoji: typeof entryIdentity.emoji === "string" ? entryIdentity.emoji : undefined,
+    };
+  }
+
+  const list = agents?.list;
   const fromList = Array.isArray(list) ? list.find((a) => a?.id === agentId)?.identity : undefined;
   if (fromList) {
     return {
@@ -72,6 +99,7 @@ export function resolveAgentIdentity(config: unknown, agentId: string): AgentIde
       emoji: typeof fromList.emoji === "string" ? fromList.emoji : undefined,
     };
   }
+
   if (agentId === "main") {
     const defaultsIdentity = (config as { agents?: { defaults?: { identity?: { name?: unknown; emoji?: unknown } } } } | undefined)
       ?.agents?.defaults?.identity;

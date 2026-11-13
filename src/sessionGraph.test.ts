@@ -33,17 +33,37 @@ describe("resolveConfiguredAgentIds", () => {
     expect(ids.sort()).toEqual(["diag-db", "diag-k8s", "main"]);
   });
 
+  it("reads agent ids from agents.entries (OpenClaw 2026.10.10+)", () => {
+    const ids = resolveConfiguredAgentIds({
+      agents: { entries: { main: {}, "diag-k8s": {}, "diag-db": {}, "diag-verifier": {} } },
+    });
+    expect(ids.sort()).toEqual(["diag-db", "diag-k8s", "diag-verifier", "main"]);
+  });
+
+  it("merges agents.entries and agents.list, deduping ids", () => {
+    const ids = resolveConfiguredAgentIds({
+      agents: { entries: { "diag-k8s": {}, main: {} }, list: [{ id: "diag-db" }, { id: "diag-k8s" }] },
+    });
+    expect(ids.sort()).toEqual(["diag-db", "diag-k8s", "main"]);
+  });
+
   it("dedupes and tolerates missing/malformed config", () => {
     expect(resolveConfiguredAgentIds({ agents: { list: [{ id: "main" }] } })).toEqual(["main"]);
     expect(resolveConfiguredAgentIds({})).toEqual(["main"]);
     expect(resolveConfiguredAgentIds(undefined)).toEqual(["main"]);
     expect(resolveConfiguredAgentIds({ agents: { list: "not an array" } })).toEqual(["main"]);
+    expect(resolveConfiguredAgentIds({ agents: { entries: "not an object" } })).toEqual(["main"]);
   });
 });
 
 describe("resolveAgentIdentity", () => {
   it("finds identity from agents.list[]", () => {
     const config = { agents: { list: [{ id: "diag-k8s", identity: { name: "Kubectl", emoji: "☸️" } }] } };
+    expect(resolveAgentIdentity(config, "diag-k8s")).toEqual({ name: "Kubectl", emoji: "☸️" });
+  });
+
+  it("finds identity from agents.entries[id] (OpenClaw 2026.10.10+)", () => {
+    const config = { agents: { entries: { "diag-k8s": { identity: { name: "Kubectl", emoji: "☸️" } } } } };
     expect(resolveAgentIdentity(config, "diag-k8s")).toEqual({ name: "Kubectl", emoji: "☸️" });
   });
 
