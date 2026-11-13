@@ -252,6 +252,10 @@ export async function generateExplanations(
       const explanationByIndex = new Map(match.toolCalls.map((t) => [t.index, t.explanation]));
       const toolCalls: ExplainedToolCall[] = run.toolCalls.map((t, index) => ({
         ...t,
+        // Redact the command text again here (not just for the LLM prompt in
+        // `toPromptRun`) so the rendered HTML report never writes un-redacted
+        // command metadata to disk. Idempotent over the host's own masking.
+        meta: redactCommandText(t.meta),
         explanation: explanationByIndex.get(index) ?? "(no explanation)",
       }));
       explainedByRunId.set(run.runId, { ...run, summary: match.summary ?? "(no summary)", toolCalls });
@@ -266,6 +270,6 @@ function fallbackExplainedRun(run: SessionRunTrace): ExplainedRun {
   return {
     ...run,
     summary: "(explanation unavailable)",
-    toolCalls: run.toolCalls.map((t) => ({ ...t, explanation: "(no explanation)" })),
+    toolCalls: run.toolCalls.map((t) => ({ ...t, meta: redactCommandText(t.meta), explanation: "(no explanation)" })),
   };
 }

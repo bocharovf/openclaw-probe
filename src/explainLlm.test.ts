@@ -241,4 +241,31 @@ describe("generateExplanations", () => {
     expect(sentMeta).not.toContain("supersecretvalue");
     expect(sentMeta.length).toBeLessThan(longMeta.length);
   });
+
+  it("redacts command text in the returned runs too, so the HTML report never writes secrets", async () => {
+    const runs = [run("run-1", "main", [{ toolName: "exec", meta: 'curl -H "Authorization: Bearer sk-abcdef123456" https://x' }])];
+    const complete = vi.fn().mockResolvedValue({
+      text: JSON.stringify({ runs: [{ runId: "run-1", summary: "s", toolCalls: [{ index: 0, explanation: "e" }] }] }),
+      provider: "p",
+      model: "m",
+      usage: {},
+    });
+
+    const result = await generateExplanations(fakeApi(complete), runs, {}, { language: "en" }, logger);
+
+    const meta = result.explainedRuns[0].toolCalls[0].meta;
+    expect(meta).not.toContain("sk-abcdef123456");
+    expect(meta).toContain("[REDACTED]");
+  });
+
+  it("redacts command text in the fallback path too", async () => {
+    const runs = [run("run-1", "main", [{ toolName: "exec", meta: "TOKEN=supersecretvalue kubectl get pods" }])];
+    const complete = vi.fn().mockResolvedValue({ text: "not json", provider: "p", model: "m", usage: {} });
+
+    const result = await generateExplanations(fakeApi(complete), runs, {}, { language: "en" }, logger);
+
+    const meta = result.explainedRuns[0].toolCalls[0].meta;
+    expect(meta).not.toContain("supersecretvalue");
+    expect(meta).toContain("[REDACTED]");
+  });
 });
