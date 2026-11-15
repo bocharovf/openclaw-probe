@@ -248,18 +248,11 @@ between these two runs?" without you having to eyeball two JSON blobs by hand.
   had `null` there.
 - **List/"what was used or happened" fields** (`sessions.session_ids`, `sessions.agents_used`,
   `models_used`, `tools_used`, `plugins_used`, `skills_used`, the `errors.*.by_tool`/
-  `by_status`/`by_code` breakdowns, `events`, `warnings`): compared as a **set difference
+  `by_status`/`by_code` breakdowns, `warnings`): compared as a **set difference
   name2 − name1**, discarding counts - only presence/absence matters. A value present in
   name2 but not name1 is prefixed `+` (added); present in name1 but not name2 is prefixed `-`
   (removed); present in both is omitted entirely. For example, if `skillA` was used in name2
-  but not name1, the diff shows `+skillA`; the reverse shows `-skillA`. `events` is diffed by
-  each entry's **`<type>: <name>`** (e.g. `"tool call: exec"`, `"skill used: aiops-incident"`),
-  not its full text - timestamps and any duration/status/still-running detail (`"(0.16s)"`,
-  `"(failed: tool_failed, 0.41s)"`, `"(started, still running at window end)"`,
-  `"(with tool call)"`) are stripped before comparing, so a repeat call to the same
-  tool/model/skill - even with a different duration or outcome - is not treated as a change.
-  A tool called 5 times in name1 and once in name2 shows no change at all here, since this
-  only tracks presence, not count (see `tools_used` above for counts).
+  but not name1, the diff shows `+skillA`; the reverse shows `-skillA`.
 - **Identifying/time fields are never diffed**: `probe.name`, `probe.mode`,
   `probe.generated_at`, `window.ts_start`, `window.ts_end`. They appear only in the diff
   report's `compared` header, for context.
@@ -341,7 +334,6 @@ name2, diff }`, `DiffSet` = `{ added, removed }`).
       "chars_found": { "name1": 1187, "name2": 0, "diff": -1187 }
     }
   },
-  "events": { "added": ["skill used: aiops-incident"], "removed": ["tool call: postgres_query"] },
   "warnings": { "added": [], "removed": [] }
 }
 ```
@@ -483,14 +475,6 @@ explanation attached to every section.
     "explicit": { "calls": 1, "hits_total": 1, "chars_found": 1187 },        // memory_search/memory_get called directly in the agent's own session
     "file": "/root/.openclaw/state/plugins/probe/results/baseline.memory-search.jsonl"
   },
-  "events": [
-    { "date": "2026-08-01T12:00:02.940Z", "event": "agent run: main (started, still running at window end)" },
-    { "date": "2026-08-01T12:00:15.703Z", "event": "LLM call: anthropic/claude-x (with tool call)" },
-    { "date": "2026-08-01T12:00:15.900Z", "event": "tool call: read (0.2s)" },
-    { "date": "2026-08-01T12:00:22.150Z", "event": "skill used: aiops-incident" },
-    { "date": "2026-08-01T12:03:41.100Z", "event": "tool call: postgres_query (failed: connection_refused, 0.3s)" },
-    { "date": "2026-08-01T12:03:41.210Z", "event": "agent run: main (41.7s)" }
-  ],
   "warnings": []
 }
 ```
@@ -575,30 +559,6 @@ every call in the window (query, source, hits, chars, and the actual snippets/te
 when nothing was captured. All-zero with `file: null` is the expected state when neither
 Active Memory nor explicit memory search happened in the window (including when neither is
 configured on the host at all) - see [Requirements](#requirements).
-
-**`events`** - a chronological timeline merging everything else in the report into one log:
-`{ "date": "<ISO timestamp>", "event": "<short description>" }` entries, sorted ascending.
-One entry per:
-- completed agent run - `"agent run: <agentId> (<duration>)"`, or with a status/error code
-  suffix on failure, or `"(started, still running at window end)"` if it never finished
-  inside the window (also true for sub-agent runs - each has its own `agentId`, so a
-  sub-agent spawn shows up as its own `agent run: <sub-agent id>` entry alongside the
-  `tool call: sessions_spawn` entry that triggered it);
-- completed tool call - `"tool call: <name> (<duration>)"`, with the same failure/still-running
-  suffixes as agent runs;
-- LLM call - `"LLM call: <provider>/<model>"`, with `" (with tool call)"` appended when that
-  completion produced a tool call;
-- skill use - `"skill used: <name>"`;
-- memory search/get - `"memory search (active-memory): <hits> hit(s), <chars> chars"` or
-  `"memory get (explicit): <hits> hit(s), <chars> chars"`.
-
-There is no separate `"date"`/`"time"` split and no cap on array length - a busy scenario
-(many tool calls, several sub-agents) produces a correspondingly long list. Useful for
-reconstructing what actually happened in a scenario at a glance, without cross-referencing
-`tools_used`/`models_used`/`skills_used` and the raw audit ledger by hand. The tool-call
-entries never include call arguments or results (the audit ledger that backs them is
-metadata-only by design - see [Data sources](#data-sources)), only the tool name, outcome,
-and duration.
 
 **`warnings`** - non-fatal notes, e.g. a run's trajectory events were pruned before the
 report could read it.

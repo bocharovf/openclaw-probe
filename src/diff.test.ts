@@ -25,7 +25,6 @@ function baseReport(overrides: Partial<ProbeReport> = {}): ProbeReport {
       explicit: { calls: 0, hits_total: 0, chars_found: 0 },
       file: null,
     },
-    events: [{ date: "2026-08-01T00:00:05.000Z", event: "tool call: read (0.1s)" }],
     warnings: [],
     ...overrides,
   };
@@ -135,92 +134,6 @@ describe("buildDiff", () => {
     expect(d.errors.agent_run_errors.by_code).toEqual({ added: ["deadline_exceeded"], removed: [] });
   });
 
-  it("events is a set diff of event text, ignoring timestamps", () => {
-    const r1 = baseReport({
-      events: [
-        { date: "2026-08-01T00:00:01.000Z", event: "skill used: aiops-incident" },
-        { date: "2026-08-01T00:00:02.000Z", event: "tool call: postgres_query (failed: connection_refused, 0.3s)" },
-      ],
-    });
-    const r2 = baseReport({
-      events: [
-        { date: "2026-08-02T00:00:01.000Z", event: "skill used: aiops-incident" },
-        { date: "2026-08-02T00:00:02.000Z", event: "tool call: read (0.2s)" },
-      ],
-    });
-    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
-    expect(d.events).toEqual({
-      added: ["tool call: read"],
-      removed: ["tool call: postgres_query"],
-    });
-  });
-
-  it("duplicate identical event text in one report collapses to a single set entry", () => {
-    const r1 = baseReport({ events: [] });
-    const r2 = baseReport({
-      events: [
-        { date: "2026-08-01T00:00:01.000Z", event: "tool call: read (0.1s)" },
-        { date: "2026-08-01T00:00:02.000Z", event: "tool call: read (0.1s)" },
-      ],
-    });
-    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
-    expect(d.events).toEqual({ added: ["tool call: read"], removed: [] });
-  });
-
-  it("events are grouped by <type>: <name>, ignoring duration/status/still-running detail", () => {
-    // Same tool ("exec") called multiple times with different durations in each report should
-    // not show up as a change at all - only whether a tool/model/skill started or stopped
-    // being used matters, not each individual call's timing.
-    const r1 = baseReport({
-      events: [
-        { date: "2026-08-01T00:00:01.000Z", event: "tool call: exec (0.16s)" },
-        { date: "2026-08-01T00:00:02.000Z", event: "tool call: exec (0.41s)" },
-      ],
-    });
-    const r2 = baseReport({
-      events: [
-        { date: "2026-08-02T00:00:01.000Z", event: "tool call: exec (2.76s)" },
-        { date: "2026-08-02T00:00:02.000Z", event: "tool call: exec (failed: tool_failed, 0.05s)" },
-      ],
-    });
-    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
-    expect(d.events).toEqual({ added: [], removed: [] });
-  });
-
-  it("a genuinely new tool call still shows up after normalization", () => {
-    const r1 = baseReport({
-      events: [{ date: "2026-08-01T00:00:01.000Z", event: "tool call: exec (0.16s)" }],
-    });
-    const r2 = baseReport({
-      events: [
-        { date: "2026-08-02T00:00:01.000Z", event: "tool call: exec (0.20s)" },
-        { date: "2026-08-02T00:00:02.000Z", event: "tool call: k8s_get_pods (1.5s)" },
-      ],
-    });
-    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
-    expect(d.events).toEqual({ added: ["tool call: k8s_get_pods"], removed: [] });
-  });
-
-  it("normalizes agent-run/LLM-call/still-running event kinds the same way", () => {
-    const r1 = baseReport({
-      events: [
-        { date: "t1", event: "agent run: main (212.29s)" },
-        { date: "t2", event: "LLM call: deepseek/deepseek-v4-pro (with tool call)" },
-      ],
-    });
-    const r2 = baseReport({
-      events: [
-        { date: "t3", event: "agent run: main (started, still running at window end)" },
-        { date: "t4", event: "LLM call: deepseek/deepseek-v4-pro" },
-        { date: "t5", event: "agent run: diag-state (57.47s)" },
-      ],
-    });
-    const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
-    // "agent run: main" and "LLM call: deepseek/deepseek-v4-pro" are unchanged despite the
-    // different suffixes; only the genuinely new agent shows up.
-    expect(d.events).toEqual({ added: ["agent run: diag-state"], removed: [] });
-  });
-
   it("warnings is a set diff", () => {
     const r1 = baseReport({ warnings: ["missing trajectory for run xyz"] });
     const r2 = baseReport({ warnings: [] });
@@ -261,7 +174,6 @@ describe("buildDiff", () => {
     const r2 = baseReport();
     const d = buildDiff("r1", "r1", r1, "r2", "r2", r2, "/x");
     expect(d.tools_used).toEqual({ added: [], removed: [] });
-    expect(d.events).toEqual({ added: [], removed: [] });
     expect(d.time.agent_active_sec.diff).toBe(0);
     expect(d.tokens.total.diff).toBe(0);
   });

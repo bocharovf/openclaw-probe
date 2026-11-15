@@ -17,28 +17,6 @@ function setDiff(a: string[], b: string[]): DiffSet {
   return { added, removed };
 }
 
-/** Reduces one timeline entry's `event` text to its "<type>: <name>" grouping key - e.g.
- * `"tool call: exec (0.16s)"` and `"tool call: exec (failed: tool_failed, 0.41s)"` both become
- * `"tool call: exec"`. Every event string built in `report.ts` puts its optional
- * duration/status/still-running detail in a trailing `" (...)"` block, so cutting at the first
- * `" ("` reliably strips it (event kinds with no such block, like `"skill used: x"`, are
- * returned unchanged). This is what makes the diff answer "did a new tool/model/skill start or
- * stop being used" instead of flagging every call as a change just because its duration
- * differs from the last time - which it almost always will. */
-function normalizeEventKey(event: string): string {
-  const parenIdx = event.indexOf(" (");
-  return parenIdx === -1 ? event : event.slice(0, parenIdx);
-}
-
-/** Diffs each timeline entry's normalized "<type>: <name>" key (see `normalizeEventKey`),
- * ignoring `date` (always different between two separate measurement windows, which would
- * otherwise make every event look "new") and duration/status/still-running detail (which
- * would otherwise make even a repeat call to the same tool look like a change). Two calls to
- * the same tool/skill/model within one report collapse to a single set entry either way. */
-function eventTexts(events: ProbeReport["events"]): string[] {
-  return events.map((e) => normalizeEventKey(e.event));
-}
-
 /** Builds a `ProbeDiffReport` comparing `report1` (baseline, "name1") against `report2`
  * ("name2"). Every numeric field's `diff` is `name2 - name1`; every list/usage field ("what
  * was used or happened") is a set difference name2-name1 with counts discarded - see
@@ -138,7 +116,6 @@ export function buildDiff(
         chars_found: numDiff(report1.memory_search.explicit.chars_found, report2.memory_search.explicit.chars_found),
       },
     },
-    events: setDiff(eventTexts(report1.events), eventTexts(report2.events)),
     warnings: setDiff(report1.warnings, report2.warnings),
   };
 }

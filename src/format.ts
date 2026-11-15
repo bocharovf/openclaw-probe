@@ -163,15 +163,6 @@ export function formatVerboseReport(r: ProbeReport): string {
     ].join("\n"),
   );
 
-  sections.push(
-    [
-      "## Events",
-      `Chronological log of everything else in this report, one line per agent run / tool call / LLM call / skill use / memory search (${r.events.length} entries).`,
-      r.events.length ? r.events.map((e) => `  ${e.date}  ${e.event}`).join("\n") : "  none",
-      "Source: the same audit-ledger, trajectory, and skill-usage data as the sections above, merged into one timeline and sorted by timestamp.",
-    ].join("\n"),
-  );
-
   if (r.warnings.length) {
     sections.push(["## Warnings", ...r.warnings.map((w) => `  - ${w}`)].join("\n"));
   }
@@ -298,17 +289,6 @@ export function formatVerboseDiff(d: ProbeDiffReport): string {
       fmtNumericLine("  calls", d.memory_search.explicit.calls),
       fmtNumericLine("  hits_total", d.memory_search.explicit.hits_total),
       fmtNumericLine("  chars_found", d.memory_search.explicit.chars_found),
-    ].join("\n"),
-  );
-
-  sections.push(
-    [
-      "## Events",
-      "Set difference of each event's <type>: <name> (e.g. \"tool call: exec\", \"skill used:",
-      "aiops-incident\") - timestamps and any duration/status/still-running detail are ignored,",
-      "so a repeat call to the same tool/model/skill (even with a different duration or outcome)",
-      "is not a change. Only whether something started or stopped being used at all shows up here.",
-      fmtSetLines("events", d.events),
     ].join("\n"),
   );
 

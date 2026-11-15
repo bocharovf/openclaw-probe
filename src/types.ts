@@ -93,15 +93,6 @@ export type MemorySearchStats = {
   chars_found: number;
 };
 
-/** One line of the report's chronological `events` timeline - ISO timestamp plus a short,
- * human-readable description. Built from the same underlying sources as the rest of the
- * report (audit ledger, trajectory files, probe's own skill-usage log); see
- * `events` in README's field reference for exactly which event kinds appear. */
-export type ProbeEvent = {
-  date: string;
-  event: string;
-};
-
 export type ProbeMode = "start-stop" | "range";
 
 export type ProbeReport = {
@@ -161,7 +152,6 @@ export type ProbeReport = {
     explicit: MemorySearchStats;
     file: string | null;
   };
-  events: ProbeEvent[];
   warnings: string[];
 };
 
@@ -253,7 +243,6 @@ export type ProbeDiffReport = {
     active_memory: { calls: DiffNumeric; hits_total: DiffNumeric; chars_found: DiffNumeric };
     explicit: { calls: DiffNumeric; hits_total: DiffNumeric; chars_found: DiffNumeric };
   };
-  events: DiffSet;
   warnings: DiffSet;
 };
 

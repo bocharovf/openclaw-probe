@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolvePaths } from "./paths.js";
-import { DEFAULT_CONFIG, type AuditEvent, type ProbeEvent } from "./types.js";
+import { DEFAULT_CONFIG, type AuditEvent } from "./types.js";
 
 vi.mock("./cli.js", () => ({
   fetchAuditEvents: vi.fn(),
@@ -291,217 +291,70 @@ describe("buildReport", () => {
       expect(report.memory_search.active_memory).toEqual({ calls: 2, hits_total: 1, chars_found: 30 });
       expect(report.memory_search.explicit).toEqual({ calls: 1, hits_total: 1, chars_found: 200 });
     });
-
-    it("adds one events-timeline entry per memory search/get call, labeled by source", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-      mockedCollectMemorySearchEvents.mockResolvedValueOnce([
-        { observedAt: "2026-08-01T00:00:01.000Z", source: "active_memory", tool: "memory_search", query: "wings", hits: 1, charsFound: 30, content: "x" },
-        { observedAt: "2026-08-01T00:00:02.000Z", source: "explicit", tool: "memory_get", query: "memory/x.md", hits: 1, charsFound: 200, content: "y" },
-      ]);
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "memory-search-events",
-        slug: "memory-search-events",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 1000,
-      });
-
-      const memEvents = report.events.filter((e) => e.event.startsWith("memory "));
-      expect(memEvents).toEqual([
-        { date: "2026-08-01T00:00:01.000Z", event: "memory search (active-memory): 1 hit, 30 chars" },
-        { date: "2026-08-01T00:00:02.000Z", event: "memory get (explicit): 1 hit, 200 chars" },
-      ]);
-    });
   });
 
-  describe("events timeline", () => {
-    function findEvent(events: ProbeEvent[], substring: string): ProbeEvent | undefined {
-      return events.find((e) => e.event.includes(substring));
-    }
+  it("falls back to the model.completed event's own provider/model when messagesSnapshot has no timestamp inside the run window (regression: llm_calls=0/models_used={} despite real tokens)", async () => {
+    // Reproduces a real trajectory observed live: the matched model.completed event's usage
+    // is real (correctly summed into tokens), but its messagesSnapshot was stale - every
+    // assistant-message timestamp fell well before the run's actual window (a host-side
+    // trajectory-writer quirk, not compaction - compactionCount was 0). Before this fix,
+    // that meant tokens showed real numbers while llm_calls stayed 0 and models_used was
+    // empty for the same run, which is exactly the contradiction a user flagged.
+    mockedFetchAuditEvents.mockResolvedValue([
+      ev({ kind: "agent_run", action: "agent.run.started", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 100000 }),
+      ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 200000, status: "succeeded" }),
+    ]);
+    mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+    mockedFindModelCompleted.mockResolvedValueOnce({
+      provider: "deepseek",
+      modelId: "deepseek-v4-pro",
+      ts: new Date(200000).toISOString(),
+      data: {
+        usage: { input: 100, output: 20, total: 120 },
+        // stale: every assistant timestamp is way before the run's [100000, 200000] window
+        messagesSnapshot: [
+          { role: "assistant", timestamp: 500, provider: "deepseek", model: "deepseek-v4-pro", content: [{ type: "text" }] },
+        ],
+      },
+    } as any);
 
-    it("records one entry per completed agent run and tool call, with status/duration for failures", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-1", sessionId: "s1", agentId: "main", occurredAt: 1000 }),
-        ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-1", sessionId: "s1", agentId: "main", occurredAt: 4000, status: "succeeded" }),
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1200 }),
-        ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1700, status: "succeeded" }),
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-2", sessionId: "s1", toolName: "postgres_query", occurredAt: 2000 }),
-        ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-2", sessionId: "s1", toolName: "postgres_query", occurredAt: 2500, status: "failed", errorCode: "connection_refused" }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-basic",
-        slug: "events-basic",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 5000,
-      });
-
-      const runEvent = findEvent(report.events, "agent run: main");
-      expect(runEvent).toEqual({ date: new Date(4000).toISOString(), event: "agent run: main (3s)" });
-
-      const readEvent = findEvent(report.events, "tool call: read");
-      expect(readEvent).toEqual({ date: new Date(1700).toISOString(), event: "tool call: read (0.5s)" });
-
-      const failedEvent = findEvent(report.events, "tool call: postgres_query");
-      expect(failedEvent?.event).toBe("tool call: postgres_query (failed: connection_refused, 0.5s)");
+    const { report } = await buildReport({
+      config: DEFAULT_CONFIG,
+      paths,
+      name: "stale-snapshot",
+      slug: "stale-snapshot",
+      mode: "start-stop",
+      tsStartMs: 0,
+      tsEndMs: 300000,
     });
 
-    it("records a still-running entry for a run/tool call with no matching finish in the window", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-unfinished", sessionId: "s1", agentId: "diag-state", occurredAt: 1000 }),
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-unfinished", sessionId: "s1", toolName: "exec", occurredAt: 1500 }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+    expect(report.tokens.total).toBe(120); // unaffected either way - not the bug
+    expect(report.iterations.llm_calls).toBe(1); // was 0 before the fix
+    expect(report.models_used).toEqual({ "deepseek/deepseek-v4-pro": 1 }); // was {} before the fix
+    expect(report.iterations.tool_calling_rounds).toBe(0); // can't be known for the fallback call
+    expect(report.warnings.some((w) => w.includes("run_id=run-stale") && w.includes("no assistant-message timestamp"))).toBe(true);
+  });
 
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-inflight",
-        slug: "events-inflight",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 5000,
-      });
+  it("counts skills used from probe's own detection log", async () => {
+    mockedFetchAuditEvents.mockResolvedValue([
+      ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1000 }),
+      ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1100, status: "succeeded" }),
+    ]);
+    mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+    mockedCollectSkillUsageEvents.mockResolvedValueOnce([
+      { observedAt: new Date(1050).toISOString(), skillId: "weather", skillName: "weather" },
+    ]);
 
-      expect(findEvent(report.events, "agent run: diag-state")?.event).toBe("agent run: diag-state (started, still running at window end)");
-      expect(findEvent(report.events, "tool call: exec")?.event).toBe("tool call: exec (started, still running at window end)");
+    const { report } = await buildReport({
+      config: DEFAULT_CONFIG,
+      paths,
+      name: "skill-usage",
+      slug: "skill-usage",
+      mode: "start-stop",
+      tsStartMs: 0,
+      tsEndMs: 5000,
     });
 
-    it("records one entry per LLM call from the trajectory, noting tool-calling turns", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-1", sessionId: "s1", agentId: "main", occurredAt: 1000 }),
-        ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-1", sessionId: "s1", agentId: "main", occurredAt: 4000, status: "succeeded" }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-      mockedFindModelCompleted.mockResolvedValueOnce({
-        provider: "deepseek",
-        modelId: "deepseek-v4-pro",
-        data: {
-          usage: { total: 100 },
-          messagesSnapshot: [
-            { role: "assistant", timestamp: 1500, provider: "deepseek", model: "deepseek-v4-pro", content: [{ type: "toolCall" }] },
-            { role: "assistant", timestamp: 3500, provider: "deepseek", model: "deepseek-v4-pro", content: [{ type: "text" }] },
-          ],
-        },
-      } as any);
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-llm",
-        slug: "events-llm",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 5000,
-      });
-
-      const llmEvents = report.events.filter((e) => e.event.startsWith("LLM call:"));
-      expect(llmEvents).toEqual([
-        { date: new Date(1500).toISOString(), event: "LLM call: deepseek/deepseek-v4-pro (with tool call)" },
-        { date: new Date(3500).toISOString(), event: "LLM call: deepseek/deepseek-v4-pro" },
-      ]);
-    });
-
-    it("falls back to the model.completed event's own provider/model when messagesSnapshot has no timestamp inside the run window (regression: llm_calls=0/models_used={} despite real tokens)", async () => {
-      // Reproduces a real trajectory observed live: the matched model.completed event's usage
-      // is real (correctly summed into tokens), but its messagesSnapshot was stale - every
-      // assistant-message timestamp fell well before the run's actual window (a host-side
-      // trajectory-writer quirk, not compaction - compactionCount was 0). Before this fix,
-      // that meant tokens showed real numbers while llm_calls stayed 0 and models_used was
-      // empty for the same run, which is exactly the contradiction a user flagged.
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "agent_run", action: "agent.run.started", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 100000 }),
-        ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-stale", sessionId: "s1", agentId: "main", occurredAt: 200000, status: "succeeded" }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-      mockedFindModelCompleted.mockResolvedValueOnce({
-        provider: "deepseek",
-        modelId: "deepseek-v4-pro",
-        ts: new Date(200000).toISOString(),
-        data: {
-          usage: { input: 100, output: 20, total: 120 },
-          // stale: every assistant timestamp is way before the run's [100000, 200000] window
-          messagesSnapshot: [
-            { role: "assistant", timestamp: 500, provider: "deepseek", model: "deepseek-v4-pro", content: [{ type: "text" }] },
-          ],
-        },
-      } as any);
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-stale-snapshot",
-        slug: "events-stale-snapshot",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 300000,
-      });
-
-      expect(report.tokens.total).toBe(120); // unaffected either way - not the bug
-      expect(report.iterations.llm_calls).toBe(1); // was 0 before the fix
-      expect(report.models_used).toEqual({ "deepseek/deepseek-v4-pro": 1 }); // was {} before the fix
-      expect(report.iterations.tool_calling_rounds).toBe(0); // can't be known for the fallback call
-      const llmEvent = report.events.find((e) => e.event.startsWith("LLM call:"));
-      expect(llmEvent?.date).toBe(new Date(200000).toISOString());
-      expect(llmEvent?.event).toContain("deepseek/deepseek-v4-pro");
-      expect(report.warnings.some((w) => w.includes("run_id=run-stale") && w.includes("no assistant-message timestamp"))).toBe(true);
-    });
-
-    it("records one entry per skill use", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1000 }),
-        ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-1", sessionId: "s1", toolName: "read", occurredAt: 1100, status: "succeeded" }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-      mockedCollectSkillUsageEvents.mockResolvedValueOnce([
-        { observedAt: new Date(1050).toISOString(), skillId: "weather", skillName: "weather" },
-      ]);
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-skill",
-        slug: "events-skill",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 5000,
-      });
-
-      expect(findEvent(report.events, "skill used:")?.event).toBe("skill used: weather");
-      expect(report.skills_used).toEqual({ weather: { name: "weather", uses: 1 } });
-    });
-
-    it("sorts events chronologically regardless of source order", async () => {
-      mockedFetchAuditEvents.mockResolvedValue([
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-late", sessionId: "s1", toolName: "read", occurredAt: 4000 }),
-        ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-late", sessionId: "s1", toolName: "read", occurredAt: 4100, status: "succeeded" }),
-        ev({ kind: "tool_action", action: "tool.action.started", toolCallId: "tc-early", sessionId: "s1", toolName: "exec", occurredAt: 1000 }),
-        ev({ kind: "tool_action", action: "tool.action.finished", toolCallId: "tc-early", sessionId: "s1", toolName: "exec", occurredAt: 1100, status: "succeeded" }),
-      ]);
-      mockedFetchToolToPluginMap.mockResolvedValue(new Map());
-
-      const { report } = await buildReport({
-        config: DEFAULT_CONFIG,
-        paths,
-        name: "events-order",
-        slug: "events-order",
-        mode: "start-stop",
-        tsStartMs: 0,
-        tsEndMs: 5000,
-      });
-
-      const dates = report.events.map((e) => Date.parse(e.date));
-      expect(dates).toEqual([...dates].sort((a, b) => a - b));
-      expect(report.events[0].event).toContain("exec");
-      expect(report.events[1].event).toContain("read");
-    });
+    expect(report.skills_used).toEqual({ weather: { name: "weather", uses: 1 } });
   });
 });

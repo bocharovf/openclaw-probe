@@ -142,7 +142,7 @@ gate `llm_calls`/`models_used` entirely on that filter passing.** Found live on 
 non-toy session (`d6d5a20c-...`, name `createdeletehostwithskill1`): the report showed real
 non-zero `tokens` (from `mc.data.usage`, summed unconditionally once per matched run) but
 `llm_calls: 0` and `models_used: {}` for the same run - a real user-reported contradiction,
-not user error. Root cause: `llm_calls`/`models_used`/the `"LLM call:"` timeline entries were
+not user error. Root cause: `llm_calls`/`models_used` were
 derived *only* by filtering `mc.data.messagesSnapshot` for assistant messages whose
 `m.timestamp` fell inside `[rw.startedMs - 1000, rw.finishedMs + 1000]` - and on that session,
 every `model.completed` event's snapshot (checked directly in the raw `.trajectory.jsonl`)
@@ -161,31 +161,6 @@ so it's deliberately left uncounted for the fallback path, with a `warnings` ent
 don't try to guess it from `tools_used`/audit data, that would silently misattribute unrelated
 tool calls from other LLM calls in the same run. Regression test:
 `report.test.ts`'s "falls back to the model.completed event's own provider/model...".
-
-**`events` in `src/diff.ts`'s `buildDiff` is set-diffed by each entry's
-normalized `"<type>: <name>"` key (`normalizeEventKey`), not its raw `event`
-text, and `date` is discarded before comparing.** Two separate measurement
-windows always have different timestamps for otherwise-identical events, so
-including `date` in the comparison key would make every single event look
-"added" on one side and "removed" on the other — the diff would be 100%
-noise. The same problem exists one level down: `report.ts` bakes
-duration/status/still-running detail into the tail of `event` (e.g.
-`"tool call: exec (0.16s)"` vs `"(failed: tool_failed, 0.41s)"` vs
-`"(started, still running at window end)"`) — diffing the raw string made
-two calls to the *same* tool with different durations look like a
-tool-added-and-removed pair, which is exactly what a user flagged live
-(`/probe diff` on two runs that both called `exec` repeatedly showed it as
-both `+`/`-`). `normalizeEventKey` fixes this by cutting at the first
-`" ("`, since every event format in `report.ts` puts that detail in a
-trailing `" (...)"` block and nothing else uses `" ("` — if you add a new
-timeline event kind in `report.ts`, keep that convention (detail goes in a
-trailing parenthesized block) or `normalizeEventKey` will silently stop
-stripping it correctly. This also means a report with the same tool/
-skill/model called multiple times (with different outcomes/durations)
-collapses to one set entry, same as before; that's intentional — the diff
-answers "did X start/stop being used at all," not "how many times," which
-is also why `events`/`tools_used`/etc have no per-item count in the diff
-output in the first place.
 
 **The Active Memory plugin's blocking-recall sub-agent is identifiable via
 `sessionKey`/`sessionId`, not a separate `agentId` — confirmed live via

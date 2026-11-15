@@ -83,7 +83,6 @@ function emptyReport(overrides: Partial<Awaited<ReturnType<typeof buildReport>>[
       explicit: { calls: 0, hits_total: 0, chars_found: 0 },
       file: null,
     },
-    events: [],
     warnings: [],
     ...overrides,
   };

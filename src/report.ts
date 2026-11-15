@@ -5,7 +5,7 @@ import type { ProbePaths } from "./paths.js";
 import { memorySearchResultsPath, rawRequestsPath } from "./store.js";
 import { collectSkillUsageEvents } from "./skillUsage.js";
 import { extractSystemPromptChars, findContextCompiledNear, findModelCompleted } from "./trajectory.js";
-import type { AuditEvent, ProbeConfig, ProbeEvent, ProbeMode, ProbeReport, RunWindow, SkillUsageEntry } from "./types.js";
+import type { AuditEvent, ProbeConfig, ProbeMode, ProbeReport, RunWindow, SkillUsageEntry } from "./types.js";
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -13,19 +13,6 @@ function iso(ms: number): string {
 
 function bump(map: Record<string, number>, key: string, by = 1): void {
   map[key] = (map[key] ?? 0) + by;
-}
-
-function fmtDuration(ms: number): string {
-  return `${Math.round((ms / 1000) * 100) / 100}s`;
-}
-
-/** Formats the "(status, duration)" suffix for a timeline entry - empty string when the
- * outcome was a plain success and no duration is known, so the common case stays terse. */
-function describeOutcome(status: string, errorCode: string | undefined, durationMs: number | undefined): string {
-  const parts: string[] = [];
-  if (status !== "succeeded") parts.push(errorCode ? `${status}: ${errorCode}` : status);
-  if (durationMs !== undefined) parts.push(fmtDuration(durationMs));
-  return parts.length ? ` (${parts.join(", ")})` : "";
 }
 
 /** True for a run window that belongs to the Active Memory plugin's own blocking-recall
@@ -89,9 +76,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
 
   const sessionIds = [...new Set(events.map((e) => e.sessionId).filter((v): v is string => !!v))].sort();
 
-  // ---- events timeline (one line per agent run / tool call / LLM call / skill use) ----
-  const timeline: ProbeEvent[] = [];
-
   // ---- time ----
   let agentActiveMs = 0;
   const runWindows: RunWindow[] = [];
@@ -99,17 +83,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
   const agentRunErrorsByCode: Record<string, number> = {};
   for (const pair of runs.values()) {
     const { started, finished } = pair;
-    const agentId = (finished ?? started)?.agentId ?? "unknown";
-    if (started && finished) {
-      timeline.push({
-        date: iso(finished.occurredAt),
-        event: `agent run: ${agentId}${describeOutcome(finished.status, finished.errorCode, finished.occurredAt - started.occurredAt)}`,
-      });
-    } else if (finished) {
-      timeline.push({ date: iso(finished.occurredAt), event: `agent run: ${agentId}${describeOutcome(finished.status, finished.errorCode, undefined)}` });
-    } else if (started) {
-      timeline.push({ date: iso(started.occurredAt), event: `agent run: ${agentId} (started, still running at window end)` });
-    }
     if (!started || !finished) continue; // still in flight at window close
     const duration = finished.occurredAt - started.occurredAt;
     agentActiveMs += duration;
@@ -136,16 +109,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     const { started, finished } = pair;
     const toolName = (finished ?? started)?.toolName ?? "unknown";
     bump(toolsUsed, toolName);
-    if (started && finished) {
-      timeline.push({
-        date: iso(finished.occurredAt),
-        event: `tool call: ${toolName}${describeOutcome(finished.status, finished.errorCode, finished.occurredAt - started.occurredAt)}`,
-      });
-    } else if (finished) {
-      timeline.push({ date: iso(finished.occurredAt), event: `tool call: ${toolName}${describeOutcome(finished.status, finished.errorCode, undefined)}` });
-    } else if (started) {
-      timeline.push({ date: iso(started.occurredAt), event: `tool call: ${toolName} (started, still running at window end)` });
-    }
     if (started && finished) toolExecMs += finished.occurredAt - started.occurredAt;
     if (finished && finished.status !== "succeeded") {
       bump(toolErrorsByTool, toolName);
@@ -200,7 +163,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       const model = m.model as string | undefined;
       const key = provider && model ? `${provider}/${model}` : runLevelModel;
       bump(modelsUsed, key ?? "unknown");
-      timeline.push({ date: iso(ts), event: `LLM call: ${key ?? "unknown"}${hadToolCall ? " (with tool call)" : ""}` });
     }
 
     // Fallback for a real but unmatchable completion: `mc` proves a model.completed event
@@ -218,11 +180,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     if (matchedInWindow === 0) {
       llmCalls += 1;
       bump(modelsUsed, runLevelModel ?? "unknown");
-      const ts = typeof mc.ts === "string" ? mc.ts : iso(rw.finishedMs);
-      timeline.push({
-        date: ts,
-        event: `LLM call: ${runLevelModel ?? "unknown"} (tool-call status unknown - trajectory snapshot timestamps were outside the run window)`,
-      });
       warnings.push(
         `trajectory messagesSnapshot for run_id=${rw.runId} had no assistant-message timestamp inside the run window; counted 1 LLM call from the model.completed event's own provider/model instead of the snapshot, but could not determine whether it produced a tool call`,
       );
@@ -240,7 +197,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     const entry = skillsUsed[event.skillId] ?? { name: event.skillName, uses: 0 };
     entry.uses += 1;
     skillsUsed[event.skillId] = entry;
-    timeline.push({ date: event.observedAt, event: `skill used: ${event.skillName}` });
   }
 
   // ---- memory search (windowed from probe's own after_tool_call-based detection log) ----
@@ -254,12 +210,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     bucket.calls += 1;
     bucket.hits_total += event.hits;
     bucket.chars_found += event.charsFound;
-    const verb = event.tool === "memory_search" ? "search" : "get";
-    const sourceLabel = event.source === "active_memory" ? "active-memory" : "explicit";
-    timeline.push({
-      date: event.observedAt,
-      event: `memory ${verb} (${sourceLabel}): ${event.hits} hit${event.hits === 1 ? "" : "s"}, ${event.charsFound} chars`,
-    });
   }
   const memorySearchFile = await writeMemorySearchEntriesFile(memorySearchResultsPath(paths, slug), memorySearchEvents);
 
@@ -320,7 +270,6 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
     },
     llm_api_log: { entries_captured: rawEntries.length, file: rawFile },
     memory_search: { ...memorySearchStats, file: memorySearchFile },
-    events: timeline.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)),
     warnings,
   };
 
