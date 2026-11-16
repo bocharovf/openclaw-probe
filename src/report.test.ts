@@ -357,4 +357,41 @@ describe("buildReport", () => {
 
     expect(report.skills_used).toEqual({ weather: { name: "weather", uses: 1 } });
   });
+
+  it("tolerates an assistant message whose content is a plain string, not a content-block array", async () => {
+    // Live-observed on a host: one assistant message in a model.completed snapshot carried
+    // `content` as a string rather than an array of { type, ... } blocks, which crashed
+    // `content.some(...)` with "content.some is not a function". String content just means
+    // "no tool call"; it must not fail the whole report.
+    mockedFetchAuditEvents.mockResolvedValue([
+      ev({ kind: "agent_run", action: "agent.run.started", runId: "run-str", sessionId: "s1", agentId: "main", occurredAt: 1000 }),
+      ev({ kind: "agent_run", action: "agent.run.finished", runId: "run-str", sessionId: "s1", agentId: "main", occurredAt: 4000, status: "succeeded" }),
+    ]);
+    mockedFetchToolToPluginMap.mockResolvedValue(new Map());
+    mockedFindModelCompleted.mockResolvedValueOnce({
+      provider: "deepseek",
+      modelId: "deepseek-v4-flash",
+      data: {
+        usage: { input: 10, output: 20, total: 30 },
+        messagesSnapshot: [
+          { role: "assistant", timestamp: 1500, provider: "deepseek", model: "deepseek-v4-flash", content: "plain text answer" },
+        ],
+      },
+    } as any);
+
+    const { report } = await buildReport({
+      config: DEFAULT_CONFIG,
+      paths,
+      name: "string-content",
+      slug: "string-content",
+      mode: "start-stop",
+      tsStartMs: 0,
+      tsEndMs: 5000,
+    });
+
+    expect(report.iterations.llm_calls).toBe(1);
+    expect(report.models_used).toEqual({ "deepseek/deepseek-v4-flash": 1 });
+    expect(report.iterations.tool_calling_rounds).toBe(0); // string content -> no tool call
+    expect(report.tokens.total).toBe(30);
+  });
 });

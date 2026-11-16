@@ -156,8 +156,8 @@ export async function buildReport(params: BuildReportParams): Promise<BuildRepor
       if (ts === undefined || ts < rw.startedMs - 1000 || ts > rw.finishedMs + 1000) continue;
       llmCalls += 1;
       matchedInWindow += 1;
-      const content = (m.content as Array<Record<string, unknown>> | undefined) ?? [];
-      const hadToolCall = content.some((c) => c?.type === "toolCall");
+      const content = m.content as Array<Record<string, unknown>> | undefined;
+      const hadToolCall = Array.isArray(content) && content.some((c) => c?.type === "toolCall");
       if (hadToolCall) toolRounds += 1;
       const provider = m.provider as string | undefined;
       const model = m.model as string | undefined;
